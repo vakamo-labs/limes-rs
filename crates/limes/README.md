@@ -120,5 +120,4 @@ The following feature flags are available:
 * `kubernetes`: Provides the `KubernetesAuthenticator` implementation which validates tokens using Kubernetes `TokenReview`.
 * `rustls-tls`: Enable `rustls` for all dependant crates.
 * `jwks`: Provides the `JWKSWebAuthenticator`
-* `multi-tenant`: Enable support for multiple IdPs. Setting this feature flag extends core structs such as [`Subject`] by an `idp_id` field.
 * `axum`: Provides axum middleware that performs the Authentication and provides the tokens Payload as extension.
