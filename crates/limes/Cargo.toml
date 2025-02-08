@@ -8,7 +8,6 @@ homepage = { workspace = true }
 repository = { workspace = true }
 rust-version = { workspace = true }
 license = { workspace = true }
-release = true
 description = """
 Limes is a multi-tenant capable Authentication middleware for OAuth2.0 and Open ID Connect with support for axum.
 """
