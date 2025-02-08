@@ -9,7 +9,7 @@ repository = { workspace = true }
 rust-version = { workspace = true }
 license = { workspace = true }
 description = """
-Limes is an Authentication middleware for OAuth2.0 and OpenID Connect.
+Limes is a multi-tenant capable Authentication middleware for OAuth2.0 and Open ID Connect with support for axum.
 """
 
 [features]
