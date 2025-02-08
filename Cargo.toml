@@ -1,6 +1,7 @@
 [workspace]
 members = ["crates/limes", "examples/multi-tenant", "examples/single-tenant"]
 resolver = "2"
+release = false
 
 [workspace.package]
 edition = "2021"
