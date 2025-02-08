@@ -1,0 +1,19 @@
+[package]
+name = "limes-example-multi-tenant"
+resolver = "2"
+version = "0.0.1"
+edition = { workspace = true }
+homepage = { workspace = true }
+repository = { workspace = true }
+rust-version = { workspace = true }
+license = { workspace = true }
+
+[dependencies]
+axum = { version = "0.8" }
+limes = { path = "../../crates/limes", default-features = false, features = [
+    "jwks",
+    "rustls-tls",
+    "axum",
+    "kubernetes",
+] }
+tokio = { version = "1.43", features = ["rt-multi-thread"] }

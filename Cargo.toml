@@ -1,0 +1,10 @@
+[workspace]
+members = ["crates/limes", "examples/multi-tenant", "examples/single-tenant"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+homepage = "https://github.com/vakamo-labs/limes-rs"
+repository = "https://github.com/vakamo-labs/limes-rs"
+rust-version = "1.80.0"
+license = "Apache-2.0"
