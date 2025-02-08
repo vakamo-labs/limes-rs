@@ -4,17 +4,17 @@
 # Limes
 
 Limes is a multi-tenant capable Authentication middleware for OAuth2.0 and Open ID Connect with optional support for `axum`.
-It supports the following [`Authenticator`]s natively:
+It supports the following `Authenticator`s natively:
 
-* [`JWKSWebAuthenticator`](`jwks::JWKSWebAuthenticator`) that fetches JWKs keys from a `.well-known/openid-configuration`, refreshes keys regularly, and validates tokens locally.
-* [`KubernetesAuthenticator`](`kubernetes::KubernetesAuthenticator`) which validates tokens using Kubernetes `TokenReview`.
-* [`AuthenticatorChain`] holds a collection of [`Authenticator`]s and authenticates the token with the first suitable Authenticator. This is especially useful for multi-tenant setups where tokens from multiple IdPs should be accepted. Each IdP is assigned a unique `idp_id` to provide a globally unique [`Subject`] that identifies a user.
+* `JWKSWebAuthenticator` that fetches JWKs keys from a `.well-known/openid-configuration`, refreshes keys regularly, and validates tokens locally.
+* `KubernetesAuthenticator` which validates tokens using Kubernetes `TokenReview`.
+* `AuthenticatorChain` hold a collection of `Authenticator`s and authenticates the token with the first suitable Authenticator. This is especially useful for multi-tenant setups where tokens from multiple IdPs should be accepted. Each IdP is assigned a unique `idp_id` to provide a globally unique [`Subject`] that identifies a user.
 
-Custom Authenticators can easily be added by implementing the [`Authenticator`] trait.
+Custom Authenticators can easily be added by implementing the `Authenticator` trait.
 
 # Single-Tenant Example
 
-```no_run
+```rust
 use axum::{middleware::from_fn_with_state, response::IntoResponse, routing::get, Extension};
 use limes::{
     axum::authentication_middleware, format_subject, jwks::JWKSWebAuthenticator, Authentication,
@@ -53,9 +53,9 @@ async fn whoami(Extension(auth): Extension<Authentication>) -> impl IntoResponse
 ```
 
 # Multi-Tenant Setup
-Limes supports the chained Authenticators. As each Authenticator can point to a different IdP, and subject IDs are not  guaranteed to be unique across IdPs, it is important to specify the `idp_id` for each [`Authenticator`] that is used in a [`AuthenticatorChain`].
+Limes supports the chained Authenticators. As each Authenticator can point to a different IdP, and subject IDs are not  guaranteed to be unique across IdPs, it is important to specify the `idp_id` for each `Authenticator` that is used in a `AuthenticatorChain`.
 
-```no_run
+```rust
 use axum::{middleware::from_fn_with_state, response::IntoResponse, routing::get, Extension};
 use limes::{
     axum::authentication_middleware, format_subject, jwks::JWKSWebAuthenticator,
