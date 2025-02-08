@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/vakamo-labs/limes-rs/compare/limes-v0.1.1...limes-v0.1.2) - 2025-02-08
+
+### Other
+
+- *(ci)* fix release plz
+- *(ci)* Disable release for examples
+
 ## [0.1.1](https://github.com/vakamo-labs/limes-rs/compare/limes-v0.1.0...limes-v0.1.1) - 2025-02-08
 
 ### Added
