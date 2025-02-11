@@ -103,4 +103,12 @@ mod test {
         let parsed = parse_subject(subject, Some(':'));
         assert!(parsed.is_err());
     }
+
+    #[test]
+    fn test_multiple_separators() {
+        let subject = "idp:sub:sub";
+        let parsed = parse_subject(subject, Some(':')).unwrap();
+        assert_eq!(parsed.idp_id(), Some("idp".to_string()).as_ref());
+        assert_eq!(parsed.subject_in_idp(), "sub:sub");
+    }
 }
