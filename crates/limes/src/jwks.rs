@@ -5,6 +5,7 @@ use crate::{
     error::{Error, Result},
     Authentication, Authenticator, PrincipalType, Subject,
 };
+use core::f32::consts::E;
 use jsonwebtoken::{Algorithm, DecodingKey, Header, Validation};
 use jwks_client_rs::source::WebSource;
 use jwks_client_rs::{JsonWebKey, JwksClient};
@@ -57,7 +58,7 @@ pub struct JWKSWebAuthenticator {
     issuers: Vec<String>,
     scope: Option<String>,
     config_url: url::Url,
-    subject_claim: String,
+    subject_claim: Vec<String>,
 }
 
 impl JWKSWebAuthenticator {
@@ -84,7 +85,7 @@ impl JWKSWebAuthenticator {
             audiences: Vec::new(),
             scope: None,
             config_url,
-            subject_claim: SUBJECT_CLAIM.to_string(),
+            subject_claim: vec![SUBJECT_CLAIM.to_string()],
         })
     }
 
@@ -131,7 +132,16 @@ impl JWKSWebAuthenticator {
     /// If `None`, the `sub` claim will be used.
     #[must_use]
     pub fn with_subject_claim(mut self, subject_claim: String) -> Self {
-        self.subject_claim = subject_claim;
+        self.subject_claim = vec![subject_claim];
+        self
+    }
+
+    /// Set multiple claims to use as the subjects id.
+    /// Overrides any previously set claims.
+    /// If multiple claims are set, the first one that is found in the token will be used.
+    #[must_use]
+    pub fn with_subject_claims(mut self, subject_claims: Vec<String>) -> Self {
+        self.subject_claim = subject_claims;
         self
     }
 
@@ -308,7 +318,7 @@ fn authenticate_jwt(
 fn get_payload(
     idp_id: Option<&str>,
     token_data: jsonwebtoken::TokenData<serde_json::Value>,
-    subject_claim: &str,
+    subject_claim: &Vec<String>,
 ) -> Result<Authentication> {
     let subject_in_idp = get_subject(&token_data, subject_claim)?;
     let claims = token_data.claims;
@@ -361,15 +371,16 @@ fn get_email(claims: &serde_json::Value) -> Option<String> {
 
 fn get_subject(
     token_data: &jsonwebtoken::TokenData<serde_json::Value>,
-    subject_claim: &str,
+    subject_claim: &Vec<String>,
 ) -> Result<String> {
-    token_data
-        .claims
-        .get(subject_claim)
-        .and_then(value_as_string)
-        .ok_or_else(|| {
-            Error::unauthenticated(format!("Missing claim `{subject_claim}` in JWT token."))
-        })
+    for claim in subject_claim {
+        if let Some(subject) = token_data.claims.get(claim).and_then(value_as_string) {
+            return Ok(subject);
+        }
+    }
+    Err(Error::unauthenticated(format!(
+        "Could not find the subject claim in the JWT token."
+    )))
 }
 
 fn parse_human_name(claims: &serde_json::Value) -> Option<String> {
@@ -489,7 +500,12 @@ mod test {
             claims: claims.clone(),
         };
 
-        let payload = get_payload(Some("idp"), token_data, "oid").unwrap();
+        let payload = get_payload(
+            Some("idp"),
+            token_data,
+            &vec!["oid".to_string(), "sub".to_string()],
+        )
+        .unwrap();
 
         let subject = Subject::new(
             Some("idp".to_string()),
@@ -545,7 +561,7 @@ mod test {
             claims: claims.clone(),
         };
 
-        let payload = get_payload(Some("idp"), token_data, "oid").unwrap();
+        let payload = get_payload(Some("idp"), token_data, &vec!["oid".to_string()]).unwrap();
 
         let subject = Subject::new(Some("idp".to_string()), "user-oid".to_string());
 
@@ -608,7 +624,7 @@ mod test {
             claims: claims.clone(),
         };
 
-        let payload = get_payload(Some("idp"), token_data, "oid").unwrap();
+        let payload = get_payload(Some("idp"), token_data, &vec!["oid".to_string()]).unwrap();
 
         let subject = Subject::new(
             Some("idp".to_string()),
@@ -674,7 +690,7 @@ mod test {
             claims: claims.clone(),
         };
 
-        let payload = get_payload(Some("idp"), token_data, "sub").unwrap();
+        let payload = get_payload(Some("idp"), token_data, &vec!["sub".to_string()]).unwrap();
 
         let subject = Subject::new(
             Some("idp".to_string()),
@@ -746,7 +762,7 @@ mod test {
             claims: claims.clone(),
         };
 
-        let payload = get_payload(Some("idp"), token_data, "sub").unwrap();
+        let payload = get_payload(Some("idp"), token_data, &vec!["sub".to_string()]).unwrap();
 
         let subject = Subject::new(
             Some("idp".to_string()),
