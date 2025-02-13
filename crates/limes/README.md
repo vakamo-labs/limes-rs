@@ -3,7 +3,7 @@
 
 # Limes
 
-Limes is a multi-tenant capable Authentication middleware for OAuth2.0 and Open ID Connect with optional support for `axum`.
+Limes is an extendable, multi-tenant capable, Authentication middleware for OAuth2.0 and Open ID Connect with optional support for `axum`.
 It supports the following `Authenticator`s natively:
 
 * `JWKSWebAuthenticator` that fetches JWKs keys from a `.well-known/openid-configuration`, refreshes keys regularly, and validates tokens locally.
@@ -11,6 +11,9 @@ It supports the following `Authenticator`s natively:
 * `AuthenticatorChain` hold a collection of `Authenticator`s and authenticates the token with the first suitable Authenticator. This is especially useful for multi-tenant setups where tokens from multiple IdPs should be accepted. Each IdP is assigned a unique `idp_id` to provide a globally unique [`Subject`] that identifies a user.
 
 Custom Authenticators can easily be added by implementing the `Authenticator` trait.
+
+# Why the Name?
+"Limes" is the ancient Roman wall that fortified the ROman Empire. Just like those mighty walls, our Limes library stands guard, protecting your applications from unauthorized access. So, while you won't find any tangy flavors here, you will find robust authentication to keep your digital empire safe. When life gives you Limes, add auth to your crate! Wait a minute ...
 
 # Single-Tenant Example
 

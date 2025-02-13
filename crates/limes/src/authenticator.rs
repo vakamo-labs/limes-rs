@@ -88,4 +88,10 @@ impl Authentication {
     pub fn principal_type(&self) -> Option<PrincipalType> {
         self.principal_type
     }
+
+    #[must_use]
+    /// Get the email of the user.
+    pub fn email(&self) -> Option<&str> {
+        self.email.as_deref()
+    }
 }

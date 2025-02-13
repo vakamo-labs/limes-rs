@@ -26,6 +26,12 @@
 //!
 //! Custom Authenticators can easily be added by implementing the [`Authenticator`] trait.
 //!
+//! # Why the Name?
+//! "Limes" is the ancient Roman wall that fortified the ROman Empire. Just like those mighty walls, our Limes library
+//! stands guard, protecting your applications from unauthorized access. So, while you won't find any tangy flavors here,
+//! you will find robust authentication to keep your digital empire safe. When life gives you Limes, add auth to your
+//! crate! Wait a minute ...
+//!
 //! # Single-Tenant Example
 //!
 //! ```no_run
