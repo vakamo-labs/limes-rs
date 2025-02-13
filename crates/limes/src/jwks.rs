@@ -139,14 +139,14 @@ impl JWKSWebAuthenticator {
     /// Overrides any previously set claims.
     /// If multiple claims are set, the first one that is found in the token will be used.
     ///
-    /// If this function is called with an empty vector, the default `sub` claim will be used.
+    /// If this function is called with an empty vector, the previously set claim will be used,
+    /// by default this is the `sub` claim.
     #[must_use]
     pub fn with_subject_claims(mut self, subject_claims: Vec<String>) -> Self {
-        // Can be useful in multi-tenant applications. For entra-id most applications that
+        // Setting multiple claims can be useful in multi-tenant applications.
+        // For entra-id most applications that
         // interact with other applications should prefer the `oid` claim over the `sub` claim.
-        if subject_claims.is_empty() {
-            self.subject_claim = vec![SUBJECT_CLAIM.to_string()];
-        } else {
+        if !subject_claims.is_empty() {
             self.subject_claim = subject_claims;
         }
         self
