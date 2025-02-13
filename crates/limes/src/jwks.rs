@@ -5,7 +5,6 @@ use crate::{
     error::{Error, Result},
     Authentication, Authenticator, PrincipalType, Subject,
 };
-use core::f32::consts::E;
 use jsonwebtoken::{Algorithm, DecodingKey, Header, Validation};
 use jwks_client_rs::source::WebSource;
 use jwks_client_rs::{JsonWebKey, JwksClient};
@@ -141,6 +140,8 @@ impl JWKSWebAuthenticator {
     /// If multiple claims are set, the first one that is found in the token will be used.
     #[must_use]
     pub fn with_subject_claims(mut self, subject_claims: Vec<String>) -> Self {
+        // Can be useful in multi-tenant applications. For entra-id most applications that
+        // interact with other applications should prefer the `oid` claim over the `sub` claim.
         self.subject_claim = subject_claims;
         self
     }
@@ -378,9 +379,9 @@ fn get_subject(
             return Ok(subject);
         }
     }
-    Err(Error::unauthenticated(format!(
-        "Could not find the subject claim in the JWT token."
-    )))
+    Err(Error::unauthenticated(
+        "Could not find the subject claim in the JWT token.".to_string(),
+    ))
 }
 
 fn parse_human_name(claims: &serde_json::Value) -> Option<String> {
