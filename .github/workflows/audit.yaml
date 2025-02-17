@@ -1,24 +1,29 @@
 name: Security Audit
 
+concurrency:
+  group: ${{ github.repository }}-${{ github.head_ref || github.sha }}-${{ github.workflow }}
+  cancel-in-progress: true
+
 on:
   push:
-    branches:
-      - master
     paths:
-      - '**/Cargo.toml'
-  schedule:
-    - cron: '0 2 * * *' # run at 2 AM UTC
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+
+  pull_request:
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
 
 permissions:
   contents: read
 
 jobs:
-  cargo-deny:
-    permissions:
-      checks: write
-      contents: read
-      issues: write
-    runs-on: ubuntu-latest
+  security_audit:
+    runs-on: ubuntu-24.04
     steps:
-    - uses: actions/checkout@v4
-    - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: actions/checkout@v4
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --force
+      - name: Run audit check
+        run: cargo audit
