@@ -48,6 +48,7 @@ url = { version = "2.5", features = ["serde"] }
 axum = { version = "0.8" }
 pretty_assertions = "1.4"
 tokio = { version = "1.43", features = ["rt-multi-thread"] }
+tracing-test = "0.2.5"
 
 [package.metadata.docs.rs]
 # document all features
