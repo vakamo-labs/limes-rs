@@ -1,7 +1,7 @@
 [package]
 name = "limes"
 resolver = "2"
-version = "0.1.2"
+version = "0.1.3"
 readme = "README.md"
 edition = { workspace = true }
 homepage = { workspace = true }
