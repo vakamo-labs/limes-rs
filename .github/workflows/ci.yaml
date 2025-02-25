@@ -18,7 +18,7 @@ env:
   rust_stable: stable
   rust_nightly: nightly-2025-01-25
   rust_clippy: '1.84'
-  rust_min: '1.70'
+  rust_min: '1.81'
 
 defaults:
   run:
@@ -103,3 +103,21 @@ jobs:
         env:
           RUSTFLAGS: ${{ env.RUSTFLAGS }}
           RUST_BACKTRACE: ${{ env.RUST_BACKTRACE }}
+
+  test-min:
+    name: test-min
+    runs-on: ubuntu-latest
+    steps:
+      - run: sudo snap install --edge --classic just
+      - uses: actions/checkout@v4
+      - name: Install Rust ${{ env.rust_min }}
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.rust_min }}
+      - uses: Swatinem/rust-cache@v2
+      - name: "just test"
+        run: just test
+        env:
+          RUSTFLAGS: ${{ env.RUSTFLAGS }}
+          RUST_BACKTRACE: ${{ env.RUST_BACKTRACE }}
+        
