@@ -27,28 +27,40 @@ pub enum IntrospectionResult {
 #[must_use]
 pub fn introspect(token: &str) -> IntrospectionResult {
     let header = jsonwebtoken::decode_header(token);
-    if let Ok(header) = header {
-        let mut validation = Validation::new(header.alg);
-        validation.insecure_disable_signature_validation();
+    match header {
+        Ok(header) => {
+            let mut validation = Validation::new(header.alg);
+            validation.insecure_disable_signature_validation();
+            validation.validate_aud = false;
 
-        let result: JWTBearer = match jsonwebtoken::decode(token, &EMPTY_DECODE_KEY, &validation) {
-            Ok(token_data) => token_data.claims,
-            Err(_) => return IntrospectionResult::Unknown,
-        };
+            let result: JWTBearer =
+                match jsonwebtoken::decode(token, &EMPTY_DECODE_KEY, &validation) {
+                    Ok(token_data) => token_data.claims,
+                    Err(e) => {
+                        tracing::trace!(
+                            "Token is not a JWT Bearer token. Could not decode claims: {e}"
+                        );
+                        return IntrospectionResult::Unknown;
+                    }
+                };
 
-        IntrospectionResult::JWTBearer {
-            header,
-            iss: result.iss.into_set(),
-            aud: result.aud.into_set(),
+            IntrospectionResult::JWTBearer {
+                header,
+                iss: result.iss.into_set(),
+                aud: result.aud.into_set(),
+            }
         }
-    } else {
-        IntrospectionResult::Unknown
+        Err(e) => {
+            tracing::trace!("Token is not a JWT Bearer token. Could not decode header: {e}");
+            IntrospectionResult::Unknown
+        }
     }
 }
 
 #[derive(Deserialize)]
 pub(crate) struct JWTBearer {
-    _sub: String,
+    #[allow(unused)]
+    sub: String,
     iss: Issuer,
     aud: Audience,
 }
