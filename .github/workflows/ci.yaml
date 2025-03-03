@@ -2,8 +2,7 @@ on:
   push:
     branches: ["main", "limes-*.x"]
   pull_request:
-    branches: ["main", "limes-*.x"]
-  
+
 name: CI
 
 concurrency:
@@ -37,6 +36,7 @@ jobs:
       - clippy
       - docs
       - test
+      - test-min
     steps:
       - run: exit 0
 
