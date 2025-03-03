@@ -156,14 +156,23 @@ impl JWKSWebAuthenticator {
         issuer_url: &str,
         ttl: Option<Duration>,
     ) -> Result<(JwksClient<WebSource>, String, url::Url)> {
-        let mut url = url::Url::parse(issuer_url)?;
+        let mut url = url::Url::parse(issuer_url)
+            .inspect_err(|e| tracing::debug!("Failed to parse issuer url: {e}"))?;
         if !url.path().ends_with('/') {
             url.set_path(&format!("{}/", url.path()));
         }
 
-        if !url.path().ends_with(Self::WELL_KNOWN_CONFIG) {
-            url.set_path(&format!("{}/{}", url.path(), Self::WELL_KNOWN_CONFIG));
-        }
+        url = if url.path().ends_with(Self::WELL_KNOWN_CONFIG) {
+            url
+        } else {
+            url.join(Self::WELL_KNOWN_CONFIG).inspect_err(|e| {
+                tracing::debug!(
+                    "Failed to join well-known configuration '{}' to issuer url '{}': {e}",
+                    Self::WELL_KNOWN_CONFIG,
+                    url
+                );
+            })?
+        };
 
         let config = Arc::new(
             reqwest::get(url.clone())
@@ -174,17 +183,23 @@ impl JWKSWebAuthenticator {
                 })?
                 .json::<WellKnownConfig>()
                 .await
-                .map_err(|e| Error::InvalidWellKnownConfig {
-                    expected_fields: &["jwks_uri", "issuer"],
-                    source: e,
+                .map_err(|e| {
+                    tracing::debug!("Failed to parse openid configuration: {e}");
+                    Error::InvalidWellKnownConfig {
+                        expected_fields: &["jwks_uri", "issuer"],
+                        source: e,
+                    }
                 })?,
         );
         let issuer = config.issuer.clone();
         let source = WebSource::builder()
             .build(config.jwks_uri.clone())
-            .map_err(|e| Error::FetchOpenIDWellKnownConfigError {
-                url: url.to_string(),
-                source: e,
+            .map_err(|e| {
+                tracing::debug!("Failed to fetch openid configuration from '{url}': {e}");
+                Error::FetchOpenIDWellKnownConfigError {
+                    url: url.to_string(),
+                    source: e,
+                }
             })?;
         let client = JwksClient::builder();
         let client = if let Some(ttl) = ttl {
