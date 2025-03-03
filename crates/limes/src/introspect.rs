@@ -33,6 +33,11 @@ pub fn introspect(token: &str) -> IntrospectionResult {
             validation.insecure_disable_signature_validation();
             validation.validate_aud = false;
 
+            #[cfg(test)]
+            {
+                validation.validate_exp = false;
+            }
+
             let result: JWTBearer =
                 match jsonwebtoken::decode(token, &EMPTY_DECODE_KEY, &validation) {
                     Ok(token_data) => token_data.claims,
@@ -93,6 +98,30 @@ impl Issuer {
         match self {
             Issuer::Single(s) => HashSet::from([s]),
             Issuer::Multiple(s) => s,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tracing_test::traced_test;
+
+    #[test]
+    #[traced_test]
+    fn test_introspect_jwt_bearer() {
+        let token = "eyJhbGciOiJSUzI1NiIsInR5cCIgOiAiSldUIiwia2lkIiA6ICJGSXdWb1hsQnlEd1hEWEFyOW5QaU44aUlpb05hc2lIVjhKWlFIMHQ2TDZvIn0.eyJleHAiOjE3NDA0ODk0MzgsImlhdCI6MTc0MDQ4OTEzOCwiYXV0aF90aW1lIjoxNzQwNDg5MTM4LCJqdGkiOiI3NTdlZjljNS0xYTE3LTRhNzEtYjVkMS1lZTg5NGFiY2VhZGQiLCJpc3MiOiJodHRwOi8vbG9jYWxob3N0OjMwMDgwL3JlYWxtcy9pY2ViZXJnIiwiYXVkIjpbImxha2VrZWVwZXIiLCJhY2NvdW50Il0sInN1YiI6ImNmYjU1YmY2LWZjYmItNGExZS1iZmVjLTMwYzY2NDliNTJmOCIsInR5cCI6IkJlYXJlciIsImF6cCI6Imxha2VrZWVwZXIiLCJzaWQiOiJlNzM5ODg4OS0xYzQ4LTRlYmQtOTUxZi05YWRmMGU1NjI5ZjMiLCJhY3IiOiIxIiwiYWxsb3dlZC1vcmlnaW5zIjpbIioiXSwicmVhbG1fYWNjZXNzIjp7InJvbGVzIjpbIm9mZmxpbmVfYWNjZXNzIiwidW1hX2F1dGhvcml6YXRpb24iLCJkZWZhdWx0LXJvbGVzLWljZWJlcmciXX0sInJlc291cmNlX2FjY2VzcyI6eyJhY2NvdW50Ijp7InJvbGVzIjpbIm1hbmFnZS1hY2NvdW50IiwibWFuYWdlLWFjY291bnQtbGlua3MiLCJ2aWV3LXByb2ZpbGUiXX19LCJzY29wZSI6Im9wZW5pZCBlbWFpbCBwcm9maWxlIiwiZW1haWxfdmVyaWZpZWQiOnRydWUsIm5hbWUiOiJQZXRlciBDb2xkIiwicHJlZmVycmVkX3VzZXJuYW1lIjoicGV0ZXIiLCJnaXZlbl9uYW1lIjoiUGV0ZXIiLCJmYW1pbHlfbmFtZSI6IkNvbGQiLCJlbWFpbCI6InBldGVyQGV4YW1wbGUuY29tIn0.JDjjQbVklK3v7XQqFwxpzaXZylgQSjszdbSx2UUx6-XKSNMa0o64TGNVkpRioj--JJ5ZSGtMVyioT_hMnT_hTUayStZNZ1Is80n3Pg11kh8qam6mZHvmqkTg4WXYkekGoOc1_SVDsI6QI084Ut4eBKPG_XtHP2ruTR_Y6WLbmQEFMkSPTB-TULHWZ8elwuGMWdAAV60oGQgvid4FHHwJyYXJLyb2NC3Q4XSb_7sS_cZIEWgO6hRUb9VYQq1tof0NT6WegUGbzhbSTfEOOEGJ3-3bquAoxskvOXTeVB7nzCw6e8KBnZS1PYtoiCR_9fp_Ag_7xukcgrfibn9k-BlN1w";
+        let result = introspect(token);
+        match result {
+            IntrospectionResult::JWTBearer { header, iss, aud } => {
+                assert_eq!(header.alg, jsonwebtoken::Algorithm::RS256);
+                assert_eq!(iss.len(), 1);
+                assert_eq!(iss.contains("http://localhost:30080/realms/iceberg"), true);
+                assert_eq!(aud.len(), 2);
+                assert_eq!(aud.contains("account"), true);
+                assert_eq!(aud.contains("lakekeeper"), true);
+            }
+            _ => panic!("Unexpected result: {:?}", result),
         }
     }
 }
