@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4](https://github.com/vakamo-labs/limes-rs/compare/v0.1.3...v0.1.4) - 2025-03-03
+
+### Fixed
+
+- fix double slash in wellknown config url ([#20](https://github.com/vakamo-labs/limes-rs/pull/20))
+
+### Other
+
+- *(tests)* Introspection test ([#19](https://github.com/vakamo-labs/limes-rs/pull/19))
+
 ## [0.1.3](https://github.com/vakamo-labs/limes-rs/compare/v0.1.2...v0.1.3) - 2025-02-25
 
 ### Fixed
