@@ -261,9 +261,7 @@ impl Authenticator for JWKSWebAuthenticator {
                 (self.issuers.is_empty() || self.issuers.iter().any(|i| iss.contains(i)))
                     && (self.audiences.is_empty() || self.audiences.iter().any(|a| aud.contains(a)))
             }
-            IntrospectionResult::Opaque | IntrospectionResult::KubernetesLongLivedJWT { .. } => {
-                false
-            }
+            IntrospectionResult::Unknown => false,
         }
     }
 }

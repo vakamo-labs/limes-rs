@@ -19,11 +19,15 @@ use kube::api::PostParams;
 ///
 /// If no `client` is specified, the default client on the system will be used.
 ///
-/// If you don't want to validate the audience, pass an empty slice.
+/// If you don't want to validate the audience or the issuer, pass an empty slice.
 /// When using [`AuthenticatorChain`](`crate::AuthenticatorChain`), it is highly recommended to set
-/// an audience as the [`KubernetesAuthenticator`] would otherwise always return true for
+/// an audience or issuer as the [`KubernetesAuthenticator`] would otherwise always return true for
 /// [`KubernetesAuthenticator::can_handle_token()`].
 /// Many deployments can use `https://kubernetes.default.svc` as the audience.
+///
+/// If an issuer is set, the provided token must be a `JWTBearer` token with an issuer that matches.
+/// Kubernetes `TokenReviewStatus` API does not provide information about the issuer.
+/// We recommend using `audiences` instead of `issuers` for most Kubernetes setups.
 ///
 ///
 /// **Field Mappings**:
@@ -37,7 +41,7 @@ pub struct KubernetesAuthenticator {
     idp_id: Option<String>,
     client: kube::client::Client,
     audiences: Vec<String>,
-    enable_long_lived_service_tokens: bool,
+    issuers: Vec<String>,
 }
 
 impl KubernetesAuthenticator {
@@ -59,7 +63,7 @@ impl KubernetesAuthenticator {
             idp_id: idp_id.map(ToString::to_string),
             client: Self::get_client().await?,
             audiences,
-            enable_long_lived_service_tokens: false,
+            issuers: vec![],
         })
     }
 
@@ -81,17 +85,14 @@ impl KubernetesAuthenticator {
             idp_id: idp_id.map(ToString::to_string),
             client,
             audiences,
-            enable_long_lived_service_tokens: false,
+            issuers: vec![],
         })
     }
 
-    /// Enable long-lived service tokens.
-    ///
-    /// If enabled, the authenticator will accept long-lived service tokens.
-    ///
-    /// Be aware that their use is discouraged as they are not automatically rotated.
-    pub fn set_enable_long_lived_service_tokens(&mut self, val: bool) {
-        self.enable_long_lived_service_tokens = val;
+    /// Set the accepted issuers for the authenticator.
+    /// If not set, the authenticator will accept any issuer.
+    pub fn set_issuers(&mut self, issuers: Vec<String>) {
+        self.issuers = issuers;
     }
 
     async fn get_client() -> Result<kube::client::Client> {
@@ -103,6 +104,30 @@ impl KubernetesAuthenticator {
 
 impl Authenticator for KubernetesAuthenticator {
     async fn authenticate(&self, token: &str) -> Result<Authentication> {
+        // If an issuer is set, the token must be JWT and the issuer must match
+        if !self.issuers.is_empty() {
+            let introspection_result = crate::introspect::introspect(token);
+            match introspection_result {
+                IntrospectionResult::Unknown => {
+                    return Err(Error::unauthenticated(
+                        "Expected JWT token for Kubernetes Authenticator as issuer is set",
+                    ));
+                }
+                IntrospectionResult::JWTBearer {
+                    iss,
+                    aud: _aud,
+                    header: _,
+                } => {
+                    if !self.issuers.iter().any(|i| iss.contains(i)) {
+                        return Err(Error::IssuerMismatch {
+                            expected: self.issuers.clone(),
+                            actual: iss.into_iter().collect(),
+                        });
+                    }
+                }
+            }
+        }
+
         let api = kube::api::Api::all(self.client.clone());
         let review = api
             .create(
@@ -128,12 +153,14 @@ impl Authenticator for KubernetesAuthenticator {
         }
 
         match introspection_result {
-            IntrospectionResult::Opaque => false,
-            IntrospectionResult::JWTBearer { aud, .. } => {
-                self.audiences.is_empty() || self.audiences.iter().any(|a| aud.contains(a))
-            }
-            IntrospectionResult::KubernetesLongLivedJWT { .. } => {
-                self.enable_long_lived_service_tokens
+            IntrospectionResult::Unknown => false,
+            IntrospectionResult::JWTBearer {
+                iss,
+                aud,
+                header: _,
+            } => {
+                (self.issuers.is_empty() || self.issuers.iter().any(|i| iss.contains(i)))
+                    && (self.audiences.is_empty() || self.audiences.iter().any(|a| aud.contains(a)))
             }
         }
     }
@@ -192,10 +219,7 @@ impl std::fmt::Debug for KubernetesAuthenticator {
         let r = r.field("idp_id", &self.idp_id);
         r.field("audiences", &self.audiences)
             .field("client", &"kube::client::Client")
-            .field(
-                "enable_long_lived_service_tokens",
-                &self.enable_long_lived_service_tokens,
-            )
+            .field("issuers", &self.issuers)
             .finish()
     }
 }
