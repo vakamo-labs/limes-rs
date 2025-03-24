@@ -37,6 +37,7 @@ pub struct KubernetesAuthenticator {
     idp_id: Option<String>,
     client: kube::client::Client,
     audiences: Vec<String>,
+    enable_long_lived_service_tokens: bool,
 }
 
 impl KubernetesAuthenticator {
@@ -58,6 +59,7 @@ impl KubernetesAuthenticator {
             idp_id: idp_id.map(ToString::to_string),
             client: Self::get_client().await?,
             audiences,
+            enable_long_lived_service_tokens: false,
         })
     }
 
@@ -79,7 +81,17 @@ impl KubernetesAuthenticator {
             idp_id: idp_id.map(ToString::to_string),
             client,
             audiences,
+            enable_long_lived_service_tokens: false,
         })
+    }
+
+    /// Enable long-lived service tokens.
+    ///
+    /// If enabled, the authenticator will accept long-lived service tokens.
+    ///
+    /// Be aware that their use is discouraged as they are not automatically rotated.
+    pub fn set_enable_long_lived_service_tokens(&mut self, val: bool) {
+        self.enable_long_lived_service_tokens = val;
     }
 
     async fn get_client() -> Result<kube::client::Client> {
@@ -116,9 +128,12 @@ impl Authenticator for KubernetesAuthenticator {
         }
 
         match introspection_result {
-            IntrospectionResult::Unknown => false,
+            IntrospectionResult::Opaque => false,
             IntrospectionResult::JWTBearer { aud, .. } => {
                 self.audiences.is_empty() || self.audiences.iter().any(|a| aud.contains(a))
+            }
+            IntrospectionResult::KubernetesLongLivedJWT { .. } => {
+                self.enable_long_lived_service_tokens
             }
         }
     }
@@ -177,6 +192,10 @@ impl std::fmt::Debug for KubernetesAuthenticator {
         let r = r.field("idp_id", &self.idp_id);
         r.field("audiences", &self.audiences)
             .field("client", &"kube::client::Client")
+            .field(
+                "enable_long_lived_service_tokens",
+                &self.enable_long_lived_service_tokens,
+            )
             .finish()
     }
 }

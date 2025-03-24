@@ -28,6 +28,7 @@ axum = ["dep:axum", "axum-extra"]
 [dependencies]
 axum = { version = "0.8", optional = true }
 axum-extra = { version = "0.10", optional = true, features = ["typed-header"] }
+base64 = "0.22.1"
 jsonwebtoken = { version = "9.3" }
 jwks_client_rs = { version = "0.5", optional = true, default-features = false }
 k8s-openapi = { version = "0.24", features = ["v1_32"], optional = true }

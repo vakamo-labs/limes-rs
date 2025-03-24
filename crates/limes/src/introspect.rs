@@ -1,9 +1,18 @@
+use base64::engine::DecodePaddingMode;
+use base64::Engine;
 use jsonwebtoken::{DecodingKey, Header, Validation};
 use once_cell::sync::Lazy;
 use serde::Deserialize;
 use std::collections::HashSet;
 
 static EMPTY_DECODE_KEY: Lazy<DecodingKey> = Lazy::new(|| DecodingKey::from_secret(&[]));
+static BASE64_DECODER: Lazy<base64::engine::GeneralPurpose> = Lazy::new(|| {
+    base64::engine::GeneralPurpose::new(
+        &base64::alphabet::STANDARD,
+        base64::engine::GeneralPurposeConfig::new()
+            .with_decode_padding_mode(DecodePaddingMode::Indifferent),
+    )
+});
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum IntrospectionResult {
@@ -16,8 +25,22 @@ pub enum IntrospectionResult {
         /// Audience of the token
         aud: HashSet<String>,
     },
-    /// Unknown token format
-    Unknown,
+    /// The token is a long-lived Kubernetes JWT token.
+    KubernetesLongLivedJWT {
+        iss: String,
+        sub: String,
+        extra: serde_json::Value,
+    },
+    /// Opaque token format
+    Opaque,
+}
+
+#[derive(Deserialize, Debug)]
+struct Introspect {
+    iss: Option<String>,
+    sub: Option<String>,
+    #[serde(flatten)]
+    extra: serde_json::Value,
 }
 
 /// Introspect a token to determine its type and issuer.
@@ -39,16 +62,24 @@ pub fn introspect(token: &str) -> IntrospectionResult {
                 validation.validate_exp = false;
             }
 
-            let result: JWTBearer =
-                match jsonwebtoken::decode(token, &EMPTY_DECODE_KEY, &validation) {
-                    Ok(token_data) => token_data.claims,
-                    Err(e) => {
-                        tracing::trace!(
-                            "Token is not a JWT Bearer token. Could not decode claims: {e}"
+            let result: JWTBearer = match jsonwebtoken::decode(
+                token,
+                &EMPTY_DECODE_KEY,
+                &validation,
+            ) {
+                Ok(token_data) => token_data.claims,
+                Err(e) => {
+                    tracing::trace!(
+                            "Token is not a JWT Bearer token. Could not decode claims: {e}, checking if it is a Kubernetes token"
                         );
-                        return IntrospectionResult::Unknown;
+
+                    if let Some(value) = try_long_lived_kube_token(token) {
+                        return value;
                     }
-                };
+
+                    return IntrospectionResult::Opaque;
+                }
+            };
 
             IntrospectionResult::JWTBearer {
                 header,
@@ -58,9 +89,43 @@ pub fn introspect(token: &str) -> IntrospectionResult {
         }
         Err(e) => {
             tracing::trace!("Token is not a JWT Bearer token. Could not decode header: {e}");
-            IntrospectionResult::Unknown
+            IntrospectionResult::Opaque
         }
     }
+}
+
+fn try_long_lived_kube_token(token: &str) -> Option<IntrospectionResult> {
+    let parts = token.splitn(3, '.').collect::<Vec<_>>();
+    // we currently only support jwt token which consist of three parts separated by a dot, anything
+    // else is considered opaque
+    if parts.len() != 3 {
+        return Some(IntrospectionResult::Opaque);
+    }
+
+    let claims: Introspect = match BASE64_DECODER
+        .decode(parts[1])
+        .as_deref()
+        .map(serde_json::from_slice)
+    {
+        Ok(Ok(claims)) => claims,
+        Err(e) => {
+            tracing::trace!("Token is not a JWT Bearer token, second part is not base64 encoded. Could not decode claims: {e}");
+            return Some(IntrospectionResult::Opaque);
+        }
+        Ok(Err(e)) => {
+            tracing::trace!("Token is not a JWT Bearer token, second part is not valid JSON. Could not decode claims: {e}");
+            return Some(IntrospectionResult::Opaque);
+        }
+    };
+    if let Introspect {
+        iss: Some(iss),
+        sub: Some(sub),
+        extra,
+    } = claims
+    {
+        return Some(IntrospectionResult::KubernetesLongLivedJWT { iss, sub, extra });
+    }
+    None
 }
 
 #[derive(Deserialize)]
@@ -124,12 +189,12 @@ mod tests {
             IntrospectionResult::JWTBearer { header, iss, aud } => {
                 assert_eq!(header.alg, jsonwebtoken::Algorithm::RS256);
                 assert_eq!(iss.len(), 1);
-                assert_eq!(iss.contains("http://localhost:30080/realms/iceberg"), true);
+                assert!(iss.contains("http://localhost:30080/realms/iceberg"));
                 assert_eq!(aud.len(), 2);
-                assert_eq!(aud.contains("account"), true);
-                assert_eq!(aud.contains("lakekeeper"), true);
+                assert!(aud.contains("account"));
+                assert!(aud.contains("lakekeeper"));
             }
-            _ => panic!("Unexpected result: {:?}", result),
+            _ => panic!("Unexpected result: {result:?}"),
         }
     }
 
@@ -137,7 +202,10 @@ mod tests {
     #[traced_test]
     fn test_long_lived_kube_token() {
         let token = "eyJhbGciOiJSUzI1NiIsImtpZCI6Ill1aDZXRGtoUk9mcnUzb3lfekFSQXBBMklQYjdwaFdVN3F3Qkp4SURyOVEifQ.eyJpc3MiOiJrdWJlcm5ldGVzL3NlcnZpY2VhY2NvdW50Iiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC9uYW1lc3BhY2UiOiJkZWZhdWx0Iiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC9zZWNyZXQubmFtZSI6Imxha2VrZWVwZXItc2EtdG9rZW4iLCJrdWJlcm5ldGVzLmlvL3NlcnZpY2VhY2NvdW50L3NlcnZpY2UtYWNjb3VudC5uYW1lIjoibXktbGFrZWtlZXBlciIsImt1YmVybmV0ZXMuaW8vc2VydmljZWFjY291bnQvc2VydmljZS1hY2NvdW50LnVpZCI6ImI4ZTZlZTc1LTgzNDEtNGEzMC04YjNkLWU1YTIwZjRiOTFkYyIsInN1YiI6InN5c3RlbTpzZXJ2aWNlYWNjb3VudDpkZWZhdWx0Om15LWxha2VrZWVwZXIifQ.bwP_X8aBIkoDPyhmpyd1gBGIxreblgHZem1BHjhoyN3fSvMFdwg34muZAs7m3VlFphPQxQPdyvY6sqoKigCydbK1AS3-DdpdVG2jge2AKJlL27HEnWhDZwO8iD8orUlgPCNFd7qinK0FBEHOJKAAB3XSwGSt0nWL6cFcGoggbhE6IorbfPrpHHJMca7aTIu1Wo3QA4AHDekwqivWdO-CfRC7clVMjDogbd55qnxSMZnPkRQzJ7Loy9YRqzizoMo2yuaUEQ1Kfz-gDsMYBdhtzMLR25c-uVMSGNPombxImmza5YpNNbQNBA9JkQSydfGRVqGnCQcVhIZ4M8e9dc0Trw";
-        let token = introspect(token);
-        assert!(matches!(token, IntrospectionResult::JWTBearer { .. }));
+        let token = dbg!(introspect(token));
+        assert!(matches!(
+            token,
+            IntrospectionResult::KubernetesLongLivedJWT { .. }
+        ));
     }
 }
