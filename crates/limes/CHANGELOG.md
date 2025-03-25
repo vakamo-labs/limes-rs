@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/vakamo-labs/limes-rs/compare/v0.1.4...v0.2.0) - 2025-03-25
+
+### Added
+
+- *(kube)* support long lived service account tokens  ([#27](https://github.com/vakamo-labs/limes-rs/pull/27))
+
+### Other
+
+- *(deps)* update typed-builder requirement from 0.20 to 0.21 ([#25](https://github.com/vakamo-labs/limes-rs/pull/25))
+- *(deps)* update kube requirement from 0.98 to 0.99 ([#23](https://github.com/vakamo-labs/limes-rs/pull/23))
+
 ## [0.1.4](https://github.com/vakamo-labs/limes-rs/compare/v0.1.3...v0.1.4) - 2025-03-03
 
 ### Fixed
