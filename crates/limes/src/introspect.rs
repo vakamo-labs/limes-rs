@@ -31,12 +31,9 @@ pub fn introspect(token: &str) -> IntrospectionResult {
         Ok(header) => {
             let mut validation = Validation::new(header.alg);
             validation.insecure_disable_signature_validation();
+            validation.required_spec_claims = HashSet::from(["iss".to_string(), "sub".to_string()]);
             validation.validate_aud = false;
-
-            #[cfg(test)]
-            {
-                validation.validate_exp = false;
-            }
+            validation.validate_exp = false;
 
             let result: JWTBearer =
                 match jsonwebtoken::decode(token, &EMPTY_DECODE_KEY, &validation) {
@@ -45,6 +42,7 @@ pub fn introspect(token: &str) -> IntrospectionResult {
                         tracing::trace!(
                             "Token is not a JWT Bearer token. Could not decode claims: {e}"
                         );
+
                         return IntrospectionResult::Unknown;
                     }
                 };
@@ -67,6 +65,7 @@ pub(crate) struct JWTBearer {
     #[allow(unused)]
     sub: String,
     iss: Issuer,
+    #[serde(default)]
     aud: Audience,
 }
 
@@ -75,6 +74,12 @@ pub(crate) struct JWTBearer {
 enum Audience {
     Single(String),
     Multiple(HashSet<String>),
+}
+
+impl Default for Audience {
+    fn default() -> Self {
+        Audience::Multiple(HashSet::new())
+    }
 }
 
 impl Audience {
@@ -116,12 +121,27 @@ mod tests {
             IntrospectionResult::JWTBearer { header, iss, aud } => {
                 assert_eq!(header.alg, jsonwebtoken::Algorithm::RS256);
                 assert_eq!(iss.len(), 1);
-                assert_eq!(iss.contains("http://localhost:30080/realms/iceberg"), true);
+                assert!(iss.contains("http://localhost:30080/realms/iceberg"));
                 assert_eq!(aud.len(), 2);
-                assert_eq!(aud.contains("account"), true);
-                assert_eq!(aud.contains("lakekeeper"), true);
+                assert!(aud.contains("account"));
+                assert!(aud.contains("lakekeeper"));
             }
-            _ => panic!("Unexpected result: {:?}", result),
+            _ => panic!("Unexpected result: {result:?}"),
+        }
+    }
+
+    #[test]
+    #[traced_test]
+    fn test_long_lived_kube_token() {
+        let token = "eyJhbGciOiJSUzI1NiIsImtpZCI6Ill1aDZXRGtoUk9mcnUzb3lfekFSQXBBMklQYjdwaFdVN3F3Qkp4SURyOVEifQ.eyJpc3MiOiJrdWJlcm5ldGVzL3NlcnZpY2VhY2NvdW50Iiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC9uYW1lc3BhY2UiOiJkZWZhdWx0Iiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC9zZWNyZXQubmFtZSI6Imxha2VrZWVwZXItc2EtdG9rZW4iLCJrdWJlcm5ldGVzLmlvL3NlcnZpY2VhY2NvdW50L3NlcnZpY2UtYWNjb3VudC5uYW1lIjoibXktbGFrZWtlZXBlciIsImt1YmVybmV0ZXMuaW8vc2VydmljZWFjY291bnQvc2VydmljZS1hY2NvdW50LnVpZCI6ImI4ZTZlZTc1LTgzNDEtNGEzMC04YjNkLWU1YTIwZjRiOTFkYyIsInN1YiI6InN5c3RlbTpzZXJ2aWNlYWNjb3VudDpkZWZhdWx0Om15LWxha2VrZWVwZXIifQ.bwP_X8aBIkoDPyhmpyd1gBGIxreblgHZem1BHjhoyN3fSvMFdwg34muZAs7m3VlFphPQxQPdyvY6sqoKigCydbK1AS3-DdpdVG2jge2AKJlL27HEnWhDZwO8iD8orUlgPCNFd7qinK0FBEHOJKAAB3XSwGSt0nWL6cFcGoggbhE6IorbfPrpHHJMca7aTIu1Wo3QA4AHDekwqivWdO-CfRC7clVMjDogbd55qnxSMZnPkRQzJ7Loy9YRqzizoMo2yuaUEQ1Kfz-gDsMYBdhtzMLR25c-uVMSGNPombxImmza5YpNNbQNBA9JkQSydfGRVqGnCQcVhIZ4M8e9dc0Trw";
+        let token = introspect(token);
+        if let IntrospectionResult::JWTBearer { iss, .. } = token {
+            assert_eq!(
+                iss,
+                HashSet::from(["kubernetes/serviceaccount".to_string()])
+            );
+        } else {
+            panic!("Unexpected result: {:?}", token);
         }
     }
 }

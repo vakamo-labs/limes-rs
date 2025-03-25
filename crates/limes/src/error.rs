@@ -17,6 +17,11 @@ pub enum Error {
         expected: Vec<String>,
         actual: Vec<String>,
     },
+    #[error("Issuer mismatch: expected {expected:?}, got {actual:?}")]
+    IssuerMismatch {
+        expected: Vec<String>,
+        actual: Vec<String>,
+    },
     #[error("Failed to parse URL: {0}")]
     UrlParseError(#[from] url::ParseError),
     #[cfg(feature = "jwks")]
