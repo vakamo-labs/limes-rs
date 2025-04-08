@@ -134,14 +134,14 @@ mod tests {
     #[traced_test]
     fn test_long_lived_kube_token() {
         let token = "eyJhbGciOiJSUzI1NiIsImtpZCI6Ill1aDZXRGtoUk9mcnUzb3lfekFSQXBBMklQYjdwaFdVN3F3Qkp4SURyOVEifQ.eyJpc3MiOiJrdWJlcm5ldGVzL3NlcnZpY2VhY2NvdW50Iiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC9uYW1lc3BhY2UiOiJkZWZhdWx0Iiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC9zZWNyZXQubmFtZSI6Imxha2VrZWVwZXItc2EtdG9rZW4iLCJrdWJlcm5ldGVzLmlvL3NlcnZpY2VhY2NvdW50L3NlcnZpY2UtYWNjb3VudC5uYW1lIjoibXktbGFrZWtlZXBlciIsImt1YmVybmV0ZXMuaW8vc2VydmljZWFjY291bnQvc2VydmljZS1hY2NvdW50LnVpZCI6ImI4ZTZlZTc1LTgzNDEtNGEzMC04YjNkLWU1YTIwZjRiOTFkYyIsInN1YiI6InN5c3RlbTpzZXJ2aWNlYWNjb3VudDpkZWZhdWx0Om15LWxha2VrZWVwZXIifQ.bwP_X8aBIkoDPyhmpyd1gBGIxreblgHZem1BHjhoyN3fSvMFdwg34muZAs7m3VlFphPQxQPdyvY6sqoKigCydbK1AS3-DdpdVG2jge2AKJlL27HEnWhDZwO8iD8orUlgPCNFd7qinK0FBEHOJKAAB3XSwGSt0nWL6cFcGoggbhE6IorbfPrpHHJMca7aTIu1Wo3QA4AHDekwqivWdO-CfRC7clVMjDogbd55qnxSMZnPkRQzJ7Loy9YRqzizoMo2yuaUEQ1Kfz-gDsMYBdhtzMLR25c-uVMSGNPombxImmza5YpNNbQNBA9JkQSydfGRVqGnCQcVhIZ4M8e9dc0Trw";
-        let token = introspect(token);
-        if let IntrospectionResult::JWTBearer { iss, .. } = token {
+        let introspection_result = dbg!(introspect(token));
+        if let IntrospectionResult::JWTBearer { iss, .. } = introspection_result {
             assert_eq!(
                 iss,
                 HashSet::from(["kubernetes/serviceaccount".to_string()])
             );
         } else {
-            panic!("Unexpected result: {:?}", token);
+            panic!("Unexpected result: {:?}", introspection_result);
         }
     }
 }
