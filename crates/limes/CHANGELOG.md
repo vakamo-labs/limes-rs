@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1](https://github.com/vakamo-labs/limes-rs/compare/v0.2.0...v0.2.1) - 2025-04-08
+
+### Fixed
+
+- Activate aws-lc-rs crypto ([#28](https://github.com/vakamo-labs/limes-rs/pull/28))
+
 ## [0.2.0](https://github.com/vakamo-labs/limes-rs/compare/v0.1.4...v0.2.0) - 2025-03-25
 
 ### Added
