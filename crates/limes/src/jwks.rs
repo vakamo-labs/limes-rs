@@ -317,6 +317,9 @@ fn authenticate_jwt(
         JsonWebKey::Ec(jwk) => DecodingKey::from_ec_components(jwk.x(), jwk.y()).map_err(|e| {
             Error::internal("Failed to create ec decoding key from key components.", e)
         })?,
+        JsonWebKey::Okp(jwk) => DecodingKey::from_ed_components(jwk.x()).map_err(|e| {
+            Error::internal("Failed to create okp decoding key from key components.", e)
+        })?,
     };
 
     let token_data = jsonwebtoken::decode::<serde_json::Value>(token, &decoding_key, &validation)
