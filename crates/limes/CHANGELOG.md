@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2](https://github.com/vakamo-labs/limes-rs/compare/v0.2.1...v0.2.2) - 2025-08-13
+
+### Fixed
+
+- Bump jwks_client to 0.5.2 - Add support for EdDSA algorithm ([#34](https://github.com/vakamo-labs/limes-rs/pull/34))
+
 ## [0.2.1](https://github.com/vakamo-labs/limes-rs/compare/v0.2.0...v0.2.1) - 2025-04-08
 
 ### Fixed
