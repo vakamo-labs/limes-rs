@@ -32,7 +32,7 @@ axum = { version = "0.8", optional = true }
 axum-extra = { version = "0.10", optional = true, features = ["typed-header"] }
 jsonwebtoken = { version = "9.3" }
 jwks_client_rs = { version = "0.5.2", optional = true, default-features = false }
-k8s-openapi = { version = "0.24", features = ["v1_32"], optional = true }
+k8s-openapi = { version = "0.26", features = ["v1_32"], optional = true }
 kube = { version = "0.99", default-features = false, features = [
     "client",
 ], optional = true }
