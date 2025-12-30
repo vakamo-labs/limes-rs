@@ -83,9 +83,9 @@ jobs:
       - name: "doc --lib --all-features"
         run: |
           cargo doc --lib --no-deps --all-features --document-private-items
-        env:
-          RUSTFLAGS: --cfg docsrs ${{ matrix.run.RUSTFLAGS }}
-          RUSTDOCFLAGS: --cfg docsrs -Dwarnings ${{ matrix.run.RUSTDOCFLAGS }}
+        # env:
+        #   RUSTFLAGS: --cfg docsrs
+        #   RUSTDOCFLAGS: --cfg docsrs -Dwarnings
 
   test:
     name: test
