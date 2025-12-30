@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3](https://github.com/vakamo-labs/limes-rs/compare/v0.2.2...v0.2.3) - 2025-12-30
+
+### Other
+
+- Update deps (edition 2024, jsonwebtoken 10, kube 2, MSRV 1.88) ([#46](https://github.com/vakamo-labs/limes-rs/pull/46))
+
 ## [0.2.2](https://github.com/vakamo-labs/limes-rs/compare/v0.2.1...v0.2.2) - 2025-08-13
 
 ### Fixed
