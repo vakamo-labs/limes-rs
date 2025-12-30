@@ -1,9 +1,6 @@
-use jsonwebtoken::{DecodingKey, Header, Validation};
-use once_cell::sync::Lazy;
+use jsonwebtoken::Header;
 use serde::Deserialize;
 use std::collections::HashSet;
-
-static EMPTY_DECODE_KEY: Lazy<DecodingKey> = Lazy::new(|| DecodingKey::from_secret(&[]));
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum IntrospectionResult {
@@ -29,23 +26,16 @@ pub fn introspect(token: &str) -> IntrospectionResult {
     let header = jsonwebtoken::decode_header(token);
     match header {
         Ok(header) => {
-            let mut validation = Validation::new(header.alg);
-            validation.insecure_disable_signature_validation();
-            validation.required_spec_claims = HashSet::from(["iss".to_string(), "sub".to_string()]);
-            validation.validate_aud = false;
-            validation.validate_exp = false;
+            let result: JWTBearer = match jsonwebtoken::dangerous::insecure_decode(token) {
+                Ok(token_data) => token_data.claims,
+                Err(e) => {
+                    tracing::trace!(
+                        "Token is not a JWT Bearer token. Could not decode claims: {e}"
+                    );
 
-            let result: JWTBearer =
-                match jsonwebtoken::decode(token, &EMPTY_DECODE_KEY, &validation) {
-                    Ok(token_data) => token_data.claims,
-                    Err(e) => {
-                        tracing::trace!(
-                            "Token is not a JWT Bearer token. Could not decode claims: {e}"
-                        );
-
-                        return IntrospectionResult::Unknown;
-                    }
-                };
+                    return IntrospectionResult::Unknown;
+                }
+            };
 
             IntrospectionResult::JWTBearer {
                 header,
@@ -141,7 +131,7 @@ mod tests {
                 HashSet::from(["kubernetes/serviceaccount".to_string()])
             );
         } else {
-            panic!("Unexpected result: {:?}", introspection_result);
+            panic!("Unexpected result: {introspection_result:?}");
         }
     }
 }
