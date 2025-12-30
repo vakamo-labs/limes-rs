@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.3.0](https://github.com/vakamo-labs/limes-rs/compare/v0.2.1...v0.3.0) - 2025-08-13
 
+### Other
+
+- Update deps (edition 2024, jsonwebtoken 10, kube 2, MSRV 1.88) ([#46](https://github.com/vakamo-labs/limes-rs/pull/46))
+
+## [0.2.2](https://github.com/vakamo-labs/limes-rs/compare/v0.2.1...v0.2.2) - 2025-08-13
+
 ### Fixed
 
 - Bump jwks_client to 0.5.2 - Add support for EdDSA algorithm ([#34](https://github.com/vakamo-labs/limes-rs/pull/34))
