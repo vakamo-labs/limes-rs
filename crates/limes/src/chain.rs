@@ -1,7 +1,7 @@
 use crate::{
-    error::{Error, Result},
-    introspect::{introspect, IntrospectionResult},
     Authentication, Authenticator,
+    error::{Error, Result},
+    introspect::{IntrospectionResult, introspect},
 };
 
 /// Enum to hold the different authenticators.

@@ -1,7 +1,7 @@
-use axum::{middleware::from_fn_with_state, response::IntoResponse, routing::get, Extension};
+use axum::{Extension, middleware::from_fn_with_state, response::IntoResponse, routing::get};
 use limes::{
-    axum::authentication_middleware, format_subject, jwks::JWKSWebAuthenticator,
-    kubernetes::KubernetesAuthenticator, Authentication, AuthenticatorChain, AuthenticatorEnum,
+    Authentication, AuthenticatorChain, AuthenticatorEnum, axum::authentication_middleware,
+    format_subject, jwks::JWKSWebAuthenticator, kubernetes::KubernetesAuthenticator,
 };
 
 // We recommend using a character that is never used in subject ids

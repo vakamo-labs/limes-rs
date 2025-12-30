@@ -1,4 +1,4 @@
-use crate::{error::Result, introspect::IntrospectionResult, Subject};
+use crate::{Subject, error::Result, introspect::IntrospectionResult};
 use core::{future::Future, marker::Sync};
 pub(crate) use jsonwebtoken::Header;
 use std::fmt::Debug;

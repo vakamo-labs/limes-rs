@@ -1,6 +1,6 @@
-use axum::{middleware::from_fn_with_state, response::IntoResponse, routing::get, Extension};
+use axum::{Extension, middleware::from_fn_with_state, response::IntoResponse, routing::get};
 use limes::{
-    axum::authentication_middleware, format_subject, jwks::JWKSWebAuthenticator, Authentication,
+    Authentication, axum::authentication_middleware, format_subject, jwks::JWKSWebAuthenticator,
 };
 
 // Use none for single tenant setups

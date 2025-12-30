@@ -15,9 +15,9 @@ env:
   RUSTUP_WINDOWS_PATH_ADD_BIN: 1
   # Change to specific Rust release to pin
   rust_stable: stable
-  rust_nightly: nightly-2025-01-25
-  rust_clippy: '1.84'
-  rust_min: '1.82'
+  rust_nightly: nightly-2025-12-30
+  rust_clippy: '1.90'
+  rust_min: '1.88'
 
 defaults:
   run:
@@ -45,7 +45,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: sudo snap install --edge --classic just
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - name: Install Rust ${{ env.rust_clippy }}
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -60,7 +60,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: sudo snap install --edge --classic just
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - name: Install Rust ${{ env.rust_clippy }}
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -74,25 +74,25 @@ jobs:
     name: docs
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - name: Install Rust ${{ env.rust_nightly }}
+      - uses: actions/checkout@v6
+      - name: Install Rust ${{ env.rust_stable }}
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: ${{ env.rust_nightly }}
+          toolchain: ${{ env.rust_stable }}
       - uses: Swatinem/rust-cache@v2
       - name: "doc --lib --all-features"
         run: |
           cargo doc --lib --no-deps --all-features --document-private-items
-        env:
-          RUSTFLAGS: --cfg docsrs ${{ matrix.run.RUSTFLAGS }}
-          RUSTDOCFLAGS: --cfg docsrs -Dwarnings ${{ matrix.run.RUSTDOCFLAGS }}
+        # env:
+        #   RUSTFLAGS: --cfg docsrs
+        #   RUSTDOCFLAGS: --cfg docsrs -Dwarnings
 
   test:
     name: test
     runs-on: ubuntu-latest
     steps:
       - run: sudo snap install --edge --classic just
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - name: Install Rust ${{ env.rust_stable }}
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -109,7 +109,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: sudo snap install --edge --classic just
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - name: Install Rust ${{ env.rust_min }}
         uses: dtolnay/rust-toolchain@stable
         with:

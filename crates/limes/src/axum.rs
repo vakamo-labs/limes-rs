@@ -1,12 +1,12 @@
-use crate::error::Error;
 use crate::Authenticator;
+use crate::error::Error;
 use axum::extract::{Request, State};
 use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum_extra::{
-    headers::{authorization::Bearer, Authorization},
     TypedHeader,
+    headers::{Authorization, authorization::Bearer},
 };
 
 /// Middleware to authenticate requests using the provided authenticator.

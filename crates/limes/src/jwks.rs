@@ -2,8 +2,8 @@
 
 use crate::introspect::IntrospectionResult;
 use crate::{
-    error::{Error, Result},
     Authentication, Authenticator, PrincipalType, Subject,
+    error::{Error, Result},
 };
 use jsonwebtoken::{Algorithm, DecodingKey, Header, Validation};
 use jwks_client_rs::source::WebSource;

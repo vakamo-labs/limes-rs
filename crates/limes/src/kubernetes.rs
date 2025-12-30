@@ -2,8 +2,8 @@
 
 use crate::introspect::IntrospectionResult;
 use crate::{
-    error::{Error, Result},
     Authentication, Authenticator, Subject,
+    error::{Error, Result},
 };
 use k8s_openapi::api::authentication::v1::{
     TokenReview, TokenReviewSpec, TokenReviewStatus, UserInfo,

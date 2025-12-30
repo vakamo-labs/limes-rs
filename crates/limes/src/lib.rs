@@ -10,7 +10,7 @@
     clippy::doc_markdown
 )]
 #![forbid(unsafe_code)]
-#![cfg_attr(docsrs, feature(doc_cfg))]
+// #![cfg_attr(docsrs, feature(doc_cfg))]
 
 //! [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 //! [![Tests](https://github.com/vakamo-labs/limes-rs/actions/workflows/ci.yaml/badge.svg)](https://github.com/vakamo-labs/limes-rs/actions/workflows/unittests.yaml)
