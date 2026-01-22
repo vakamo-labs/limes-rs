@@ -268,7 +268,7 @@ impl Authenticator for JWKSWebAuthenticator {
             self.idp_id().map(String::as_str),
             token_data,
             &self.subject_claim,
-            self.role_claims.as_ref(),
+            self.role_claims.as_deref(),
         )
     }
 
@@ -372,8 +372,8 @@ fn authenticate_jwt(
 fn extract_authentication(
     idp_id: Option<&str>,
     token_data: jsonwebtoken::TokenData<serde_json::Value>,
-    subject_claim: &Vec<String>,
-    role_claims: Option<&Vec<String>>,
+    subject_claim: &[String],
+    role_claims: Option<&[String]>,
 ) -> Result<Authentication> {
     let subject_in_idp = get_subject(&token_data, subject_claim)?;
     let claims = token_data.claims;
@@ -427,7 +427,19 @@ fn get_email(claims: &serde_json::Value) -> Option<String> {
             .filter(|s| s.contains('@')))
 }
 
-fn get_roles(claims: &serde_json::Value, role_claims: Option<&Vec<String>>) -> Option<Vec<String>> {
+/// Extracts roles from JWT claims by checking configured claim paths.
+///
+/// # Behavior
+/// - Iterates through provided claim paths in order, returning the first non-empty match
+/// - For array values: filters out non-string elements (numbers, objects, nulls, etc.)
+/// - If an array exists but contains only non-strings, continues to the next path
+/// - If an explicitly empty array is found, continues to the next path
+/// - For single values: returns if the value is a string, otherwise continues
+/// - Returns `None` if no claim paths contain valid string roles
+///
+/// This ensures that malformed or empty role claims don't prevent fallback to alternate
+/// claim paths, while still extracting valid string roles when they exist.
+fn get_roles(claims: &serde_json::Value, role_claims: Option<&[String]>) -> Option<Vec<String>> {
     let role_claim_paths = role_claims?;
 
     for claim_path in role_claim_paths {
@@ -453,22 +465,28 @@ fn get_roles(claims: &serde_json::Value, role_claims: Option<&Vec<String>>) -> O
 
         // Handle array of strings
         if let Some(roles_array) = current.as_array() {
+            // Filter to only string values, ignoring numbers, objects, nulls, etc.
             let roles: Vec<String> = roles_array.iter().filter_map(value_as_string).collect();
             if !roles.is_empty() {
                 return Some(roles);
             }
+            // If array exists but contains no valid strings (or is empty),
+            // continue to next claim path rather than returning None immediately.
+            // This allows fallback to alternate claim paths.
         }
         // Handle single string (less common but possible)
         else if let Some(role) = value_as_string(current) {
             return Some(vec![role]);
         }
+        // If the value is neither an array nor a string (e.g., object, number),
+        // continue to the next claim path.
     }
     None
 }
 
 fn get_subject(
     token_data: &jsonwebtoken::TokenData<serde_json::Value>,
-    subject_claim: &Vec<String>,
+    subject_claim: &[String],
 ) -> Result<String> {
     for claim in subject_claim {
         if let Some(subject) = token_data.claims.get(claim).and_then(value_as_string) {
@@ -849,6 +867,68 @@ mod test {
 
         let roles = get_roles(&claims, Some(&vec!["role".to_string()]));
         assert_eq!(roles, Some(vec!["admin".to_string()]));
+    }
+
+    #[test]
+    fn test_get_roles_array_with_non_strings() {
+        // Array contains only non-string values (numbers, objects, nulls)
+        let claims = serde_json::json!({
+            "roles": [42, {"name": "admin"}, null, true]
+        });
+
+        // Should return None, not Some(vec![]), because no valid strings found
+        let roles = get_roles(&claims, Some(&vec!["roles".to_string()]));
+        assert_eq!(roles, None);
+    }
+
+    #[test]
+    fn test_get_roles_empty_array() {
+        // Explicitly empty array
+        let claims = serde_json::json!({
+            "roles": []
+        });
+
+        // Should return None, not Some(vec![]), treating empty like non-existent
+        let roles = get_roles(&claims, Some(&vec!["roles".to_string()]));
+        assert_eq!(roles, None);
+    }
+
+    #[test]
+    fn test_get_roles_mixed_array() {
+        // Array contains both strings and non-strings
+        let claims = serde_json::json!({
+            "roles": ["admin", 42, "user", null, "editor", {"name": "invalid"}]
+        });
+
+        // Should extract only the string values, filtering out non-strings
+        let roles = get_roles(&claims, Some(&vec!["roles".to_string()]));
+        assert_eq!(
+            roles,
+            Some(vec![
+                "admin".to_string(),
+                "user".to_string(),
+                "editor".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn test_get_roles_fallback_from_non_strings() {
+        // First path has only non-strings, second path has valid strings
+        let claims = serde_json::json!({
+            "invalid_roles": [42, null, {"role": "admin"}],
+            "valid_roles": ["user", "viewer"]
+        });
+
+        // Should skip first path (no valid strings) and use second path
+        let roles = get_roles(
+            &claims,
+            Some(&vec![
+                "invalid_roles".to_string(),
+                "valid_roles".to_string(),
+            ]),
+        );
+        assert_eq!(roles, Some(vec!["user".to_string(), "viewer".to_string()]));
     }
 
     #[test]
