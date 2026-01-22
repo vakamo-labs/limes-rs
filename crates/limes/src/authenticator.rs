@@ -98,8 +98,8 @@ impl Authentication {
         self.email.as_deref()
     }
 
-    #[must_use]
     /// Get the roles of the user that were extracted from the token if any.
+    #[must_use]
     pub fn roles(&self) -> Option<&[String]> {
         self.roles.as_deref()
     }
