@@ -156,7 +156,7 @@ impl JWKSWebAuthenticator {
 
     /// Set the field in the claims to extract roles from.
     /// If not called, no roles will be extracted.
-    /// 
+    ///
     /// The field should contain an array of strings or a single string.
     /// Supports nested claims using dot notation, e.g., "resource_access.account.roles"
     #[must_use]
@@ -168,14 +168,14 @@ impl JWKSWebAuthenticator {
     /// Set multiple claims in the token to extract roles from.
     /// Overrides any previously set role claims.
     /// If multiple claims are set, the first one that is found in the token will be used.
-    /// 
+    ///
     /// Supports nested claims using dot notation, e.g., "resource_access.account.roles"
     #[must_use]
     pub fn with_role_claims(mut self, role_claims: Vec<String>) -> Self {
-        if !role_claims.is_empty() {
-            self.role_claims = Some(role_claims);
-        } else {
+        if role_claims.is_empty() {
             self.role_claims = None;
+        } else {
+            self.role_claims = Some(role_claims);
         }
         self
     }
@@ -427,20 +427,17 @@ fn get_email(claims: &serde_json::Value) -> Option<String> {
             .filter(|s| s.contains('@')))
 }
 
-fn get_roles(
-    claims: &serde_json::Value,
-    role_claims: Option<&Vec<String>>,
-) -> Option<Vec<String>> {
+fn get_roles(claims: &serde_json::Value, role_claims: Option<&Vec<String>>) -> Option<Vec<String>> {
     let role_claim_paths = role_claims?;
-    
+
     for claim_path in role_claim_paths {
         // Split by dots to support nested paths like "resource_access.account.roles"
         let path_parts: Vec<&str> = claim_path.split('.').collect();
-        
+
         // Navigate through nested claims
         let mut current = claims;
         let mut found = true;
-        
+
         for part in &path_parts {
             if let Some(next) = current.get(part) {
                 current = next;
@@ -449,17 +446,14 @@ fn get_roles(
                 break;
             }
         }
-        
+
         if !found {
             continue;
         }
-        
+
         // Handle array of strings
         if let Some(roles_array) = current.as_array() {
-            let roles: Vec<String> = roles_array
-                .iter()
-                .filter_map(value_as_string)
-                .collect();
+            let roles: Vec<String> = roles_array.iter().filter_map(value_as_string).collect();
             if !roles.is_empty() {
                 return Some(roles);
             }
@@ -536,6 +530,7 @@ impl std::fmt::Debug for JWKSWebAuthenticator {
             .field("config_url", &self.config_url)
             .field("subject_claim", &self.subject_claim)
             .field("client", &"jwks_client_rs::JwksClient<WebSource>")
+            .field("role_claims", &self.role_claims)
             .finish()
     }
 }
@@ -665,7 +660,9 @@ mod test {
             claims: claims.clone(),
         };
 
-        let payload = extract_authentication(Some("idp"), token_data, &vec!["oid".to_string()], None).unwrap();
+        let payload =
+            extract_authentication(Some("idp"), token_data, &vec!["oid".to_string()], None)
+                .unwrap();
 
         let subject = Subject::new(Some("idp".to_string()), "user-oid".to_string());
 
@@ -728,7 +725,9 @@ mod test {
             claims: claims.clone(),
         };
 
-        let payload = extract_authentication(Some("idp"), token_data, &vec!["oid".to_string()], None).unwrap();
+        let payload =
+            extract_authentication(Some("idp"), token_data, &vec!["oid".to_string()], None)
+                .unwrap();
 
         let subject = Subject::new(
             Some("idp".to_string()),
@@ -754,7 +753,14 @@ mod test {
         });
 
         let roles = get_roles(&claims, Some(&vec!["roles".to_string()]));
-        assert_eq!(roles, Some(vec!["admin".to_string(), "user".to_string(), "editor".to_string()]));
+        assert_eq!(
+            roles,
+            Some(vec![
+                "admin".to_string(),
+                "user".to_string(),
+                "editor".to_string()
+            ])
+        );
     }
 
     #[test]
@@ -767,8 +773,17 @@ mod test {
             }
         });
 
-        let roles = get_roles(&claims, Some(&vec!["resource_access.account.roles".to_string()]));
-        assert_eq!(roles, Some(vec!["manage-account".to_string(), "view-profile".to_string()]));
+        let roles = get_roles(
+            &claims,
+            Some(&vec!["resource_access.account.roles".to_string()]),
+        );
+        assert_eq!(
+            roles,
+            Some(vec![
+                "manage-account".to_string(),
+                "view-profile".to_string()
+            ])
+        );
     }
 
     #[test]
@@ -790,7 +805,7 @@ mod test {
             Some(&vec![
                 "realm_access.roles".to_string(),
                 "resource_access.account.roles".to_string(),
-            ])
+            ]),
         );
         assert_eq!(roles, Some(vec!["realm-role".to_string()]));
     }
@@ -811,7 +826,7 @@ mod test {
             Some(&vec![
                 "realm_access.roles".to_string(),
                 "resource_access.account.roles".to_string(),
-            ])
+            ]),
         );
         assert_eq!(roles, Some(vec!["account-role".to_string()]));
     }
@@ -887,8 +902,9 @@ mod test {
             Some("idp"),
             token_data.clone(),
             &vec!["sub".to_string()],
-            None
-        ).unwrap();
+            None,
+        )
+        .unwrap();
 
         let subject = Subject::new(
             Some("idp".to_string()),
@@ -911,8 +927,9 @@ mod test {
             Some("idp"),
             token_data,
             &vec!["sub".to_string()],
-            Some(&vec!["realm_access.roles".to_string()])
-        ).unwrap();
+            Some(&vec!["realm_access.roles".to_string()]),
+        )
+        .unwrap();
 
         let expected_with_roles = Authentication::builder()
             .token_header(Some(token_header))
@@ -988,8 +1005,9 @@ mod test {
             Some("idp"),
             token_data.clone(),
             &vec!["sub".to_string()],
-            None
-        ).unwrap();
+            None,
+        )
+        .unwrap();
 
         let subject = Subject::new(
             Some("idp".to_string()),
@@ -1012,8 +1030,9 @@ mod test {
             Some("idp"),
             token_data,
             &vec!["sub".to_string()],
-            Some(&vec!["resource_access.account.roles".to_string()])
-        ).unwrap();
+            Some(&vec!["resource_access.account.roles".to_string()]),
+        )
+        .unwrap();
 
         let expected_with_roles = Authentication::builder()
             .token_header(Some(token_header))
