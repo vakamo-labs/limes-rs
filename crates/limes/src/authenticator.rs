@@ -45,6 +45,9 @@ pub struct Authentication {
     email: Option<String>,
     /// The type of the principal making the request.
     principal_type: Option<PrincipalType>,
+    /// Roles of the user extracted from the token if any.
+    #[builder(default)]
+    roles: Option<Vec<String>>,
 }
 
 #[derive(Debug, PartialEq, Eq, Copy, Clone, Hash)]
@@ -93,5 +96,11 @@ impl Authentication {
     /// Get the email of the user.
     pub fn email(&self) -> Option<&str> {
         self.email.as_deref()
+    }
+
+    /// Get the roles of the user that were extracted from the token if any.
+    #[must_use]
+    pub fn roles(&self) -> Option<&[String]> {
+        self.roles.as_deref()
     }
 }

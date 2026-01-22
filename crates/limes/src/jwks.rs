@@ -58,6 +58,7 @@ pub struct JWKSWebAuthenticator {
     scope: Option<String>,
     config_url: url::Url,
     subject_claim: Vec<String>,
+    role_claims: Option<Vec<String>>,
 }
 
 impl JWKSWebAuthenticator {
@@ -85,6 +86,7 @@ impl JWKSWebAuthenticator {
             scope: None,
             config_url,
             subject_claim: vec![SUBJECT_CLAIM.to_string()],
+            role_claims: None,
         })
     }
 
@@ -148,6 +150,32 @@ impl JWKSWebAuthenticator {
         // interact with other applications should prefer the `oid` claim over the `sub` claim.
         if !subject_claims.is_empty() {
             self.subject_claim = subject_claims;
+        }
+        self
+    }
+
+    /// Set the field in the claims to extract roles from.
+    /// If not called, no roles will be extracted.
+    ///
+    /// The field should contain an array of strings or a single string.
+    /// Supports nested claims using dot notation, e.g., "resource_access.account.roles"
+    #[must_use]
+    pub fn with_role_claim(mut self, role_claim: String) -> Self {
+        self.role_claims = Some(vec![role_claim]);
+        self
+    }
+
+    /// Set multiple claims in the token to extract roles from.
+    /// Overrides any previously set role claims.
+    /// If multiple claims are set, the first one that is found in the token will be used.
+    ///
+    /// Supports nested claims using dot notation, e.g., "resource_access.account.roles"
+    #[must_use]
+    pub fn with_role_claims(mut self, role_claims: Vec<String>) -> Self {
+        if role_claims.is_empty() {
+            self.role_claims = None;
+        } else {
+            self.role_claims = Some(role_claims);
         }
         self
     }
@@ -236,10 +264,11 @@ impl Authenticator for JWKSWebAuthenticator {
             self.scope.as_deref(),
         )?;
 
-        get_payload(
+        extract_authentication(
             self.idp_id().map(String::as_str),
             token_data,
             &self.subject_claim,
+            self.role_claims.as_deref(),
         )
     }
 
@@ -340,10 +369,11 @@ fn authenticate_jwt(
     Ok(token_data)
 }
 
-fn get_payload(
+fn extract_authentication(
     idp_id: Option<&str>,
     token_data: jsonwebtoken::TokenData<serde_json::Value>,
-    subject_claim: &Vec<String>,
+    subject_claim: &[String],
+    role_claims: Option<&[String]>,
 ) -> Result<Authentication> {
     let subject_in_idp = get_subject(&token_data, subject_claim)?;
     let claims = token_data.claims;
@@ -362,6 +392,8 @@ fn get_payload(
         // In Keycloak the client_id is the requesting application
         .or(claims.get("client_id").map(|_t| PrincipalType::Application));
 
+    let roles = get_roles(&claims, role_claims);
+
     Ok(Authentication::builder()
         .token_header(Some(token_data.header))
         .claims(claims.clone())
@@ -369,6 +401,7 @@ fn get_payload(
         .email(get_email(&claims))
         .subject(subject)
         .principal_type(principal_type)
+        .roles(roles)
         .build())
 }
 
@@ -394,9 +427,66 @@ fn get_email(claims: &serde_json::Value) -> Option<String> {
             .filter(|s| s.contains('@')))
 }
 
+/// Extracts roles from JWT claims by checking configured claim paths.
+///
+/// # Behavior
+/// - Iterates through provided claim paths in order, returning the first non-empty match
+/// - For array values: filters out non-string elements (numbers, objects, nulls, etc.)
+/// - If an array exists but contains only non-strings, continues to the next path
+/// - If an explicitly empty array is found, continues to the next path
+/// - For single values: returns if the value is a string, otherwise continues
+/// - Returns `None` if no claim paths contain valid string roles
+///
+/// This ensures that malformed or empty role claims don't prevent fallback to alternate
+/// claim paths, while still extracting valid string roles when they exist.
+fn get_roles(claims: &serde_json::Value, role_claims: Option<&[String]>) -> Option<Vec<String>> {
+    let role_claim_paths = role_claims?;
+
+    for claim_path in role_claim_paths {
+        // Split by dots to support nested paths like "resource_access.account.roles"
+        let path_parts: Vec<&str> = claim_path.split('.').collect();
+
+        // Navigate through nested claims
+        let mut current = claims;
+        let mut found = true;
+
+        for part in &path_parts {
+            if let Some(next) = current.get(part) {
+                current = next;
+            } else {
+                found = false;
+                break;
+            }
+        }
+
+        if !found {
+            continue;
+        }
+
+        // Handle array of strings
+        if let Some(roles_array) = current.as_array() {
+            // Filter to only string values, ignoring numbers, objects, nulls, etc.
+            let roles: Vec<String> = roles_array.iter().filter_map(value_as_string).collect();
+            if !roles.is_empty() {
+                return Some(roles);
+            }
+            // If array exists but contains no valid strings (or is empty),
+            // continue to next claim path rather than returning None immediately.
+            // This allows fallback to alternate claim paths.
+        }
+        // Handle single string (less common but possible)
+        else if let Some(role) = value_as_string(current) {
+            return Some(vec![role]);
+        }
+        // If the value is neither an array nor a string (e.g., object, number),
+        // continue to the next claim path.
+    }
+    None
+}
+
 fn get_subject(
     token_data: &jsonwebtoken::TokenData<serde_json::Value>,
-    subject_claim: &Vec<String>,
+    subject_claim: &[String],
 ) -> Result<String> {
     for claim in subject_claim {
         if let Some(subject) = token_data.claims.get(claim).and_then(value_as_string) {
@@ -458,6 +548,7 @@ impl std::fmt::Debug for JWKSWebAuthenticator {
             .field("config_url", &self.config_url)
             .field("subject_claim", &self.subject_claim)
             .field("client", &"jwks_client_rs::JwksClient<WebSource>")
+            .field("role_claims", &self.role_claims)
             .finish()
     }
 }
@@ -525,10 +616,11 @@ mod test {
             claims: claims.clone(),
         };
 
-        let payload = get_payload(
+        let payload = extract_authentication(
             Some("idp"),
             token_data,
             &vec!["oid".to_string(), "sub".to_string()],
+            None,
         )
         .unwrap();
 
@@ -586,7 +678,9 @@ mod test {
             claims: claims.clone(),
         };
 
-        let payload = get_payload(Some("idp"), token_data, &vec!["oid".to_string()]).unwrap();
+        let payload =
+            extract_authentication(Some("idp"), token_data, &vec!["oid".to_string()], None)
+                .unwrap();
 
         let subject = Subject::new(Some("idp".to_string()), "user-oid".to_string());
 
@@ -649,7 +743,9 @@ mod test {
             claims: claims.clone(),
         };
 
-        let payload = get_payload(Some("idp"), token_data, &vec!["oid".to_string()]).unwrap();
+        let payload =
+            extract_authentication(Some("idp"), token_data, &vec!["oid".to_string()], None)
+                .unwrap();
 
         let subject = Subject::new(
             Some("idp".to_string()),
@@ -666,6 +762,173 @@ mod test {
             .build();
 
         assert_eq!(payload, expected_payload);
+    }
+
+    #[test]
+    fn test_get_roles_simple_claim() {
+        let claims = serde_json::json!({
+            "roles": ["admin", "user", "editor"]
+        });
+
+        let roles = get_roles(&claims, Some(&vec!["roles".to_string()]));
+        assert_eq!(
+            roles,
+            Some(vec![
+                "admin".to_string(),
+                "user".to_string(),
+                "editor".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn test_get_roles_nested_claim() {
+        let claims = serde_json::json!({
+            "resource_access": {
+                "account": {
+                    "roles": ["manage-account", "view-profile"]
+                }
+            }
+        });
+
+        let roles = get_roles(
+            &claims,
+            Some(&vec!["resource_access.account.roles".to_string()]),
+        );
+        assert_eq!(
+            roles,
+            Some(vec![
+                "manage-account".to_string(),
+                "view-profile".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn test_get_roles_multiple_paths_first_match() {
+        let claims = serde_json::json!({
+            "realm_access": {
+                "roles": ["realm-role"]
+            },
+            "resource_access": {
+                "account": {
+                    "roles": ["account-role"]
+                }
+            }
+        });
+
+        // Should return first match
+        let roles = get_roles(
+            &claims,
+            Some(&vec![
+                "realm_access.roles".to_string(),
+                "resource_access.account.roles".to_string(),
+            ]),
+        );
+        assert_eq!(roles, Some(vec!["realm-role".to_string()]));
+    }
+
+    #[test]
+    fn test_get_roles_fallback_to_second_path() {
+        let claims = serde_json::json!({
+            "resource_access": {
+                "account": {
+                    "roles": ["account-role"]
+                }
+            }
+        });
+
+        // First path doesn't exist, should fall back to second
+        let roles = get_roles(
+            &claims,
+            Some(&vec![
+                "realm_access.roles".to_string(),
+                "resource_access.account.roles".to_string(),
+            ]),
+        );
+        assert_eq!(roles, Some(vec!["account-role".to_string()]));
+    }
+
+    #[test]
+    fn test_get_roles_no_match() {
+        let claims = serde_json::json!({
+            "other_field": "value"
+        });
+
+        let roles = get_roles(&claims, Some(&vec!["roles".to_string()]));
+        assert_eq!(roles, None);
+    }
+
+    #[test]
+    fn test_get_roles_single_string() {
+        let claims = serde_json::json!({
+            "role": "admin"
+        });
+
+        let roles = get_roles(&claims, Some(&vec!["role".to_string()]));
+        assert_eq!(roles, Some(vec!["admin".to_string()]));
+    }
+
+    #[test]
+    fn test_get_roles_array_with_non_strings() {
+        // Array contains only non-string values (numbers, objects, nulls)
+        let claims = serde_json::json!({
+            "roles": [42, {"name": "admin"}, null, true]
+        });
+
+        // Should return None, not Some(vec![]), because no valid strings found
+        let roles = get_roles(&claims, Some(&vec!["roles".to_string()]));
+        assert_eq!(roles, None);
+    }
+
+    #[test]
+    fn test_get_roles_empty_array() {
+        // Explicitly empty array
+        let claims = serde_json::json!({
+            "roles": []
+        });
+
+        // Should return None, not Some(vec![]), treating empty like non-existent
+        let roles = get_roles(&claims, Some(&vec!["roles".to_string()]));
+        assert_eq!(roles, None);
+    }
+
+    #[test]
+    fn test_get_roles_mixed_array() {
+        // Array contains both strings and non-strings
+        let claims = serde_json::json!({
+            "roles": ["admin", 42, "user", null, "editor", {"name": "invalid"}]
+        });
+
+        // Should extract only the string values, filtering out non-strings
+        let roles = get_roles(&claims, Some(&vec!["roles".to_string()]));
+        assert_eq!(
+            roles,
+            Some(vec![
+                "admin".to_string(),
+                "user".to_string(),
+                "editor".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn test_get_roles_fallback_from_non_strings() {
+        // First path has only non-strings, second path has valid strings
+        let claims = serde_json::json!({
+            "invalid_roles": [42, null, {"role": "admin"}],
+            "valid_roles": ["user", "viewer"]
+        });
+
+        // Should skip first path (no valid strings) and use second path
+        let roles = get_roles(
+            &claims,
+            Some(&vec![
+                "invalid_roles".to_string(),
+                "valid_roles".to_string(),
+            ]),
+        );
+        assert_eq!(roles, Some(vec!["user".to_string(), "viewer".to_string()]));
     }
 
     #[test]
@@ -715,7 +978,13 @@ mod test {
             claims: claims.clone(),
         };
 
-        let payload = get_payload(Some("idp"), token_data, &vec!["sub".to_string()]).unwrap();
+        let payload = extract_authentication(
+            Some("idp"),
+            token_data.clone(),
+            &vec!["sub".to_string()],
+            None,
+        )
+        .unwrap();
 
         let subject = Subject::new(
             Some("idp".to_string()),
@@ -723,15 +992,40 @@ mod test {
         );
 
         let expected_payload = Authentication::builder()
+            .token_header(Some(token_header.clone()))
+            .claims(claims.clone())
+            .name(Some("Peter Cold".to_string()))
+            .email(Some("peter@example.com".to_string()))
+            .subject(subject.clone())
+            .principal_type(Some(PrincipalType::Human))
+            .build();
+
+        assert_eq!(payload, expected_payload);
+
+        // Test with realm_access.roles extraction
+        let payload_with_roles = extract_authentication(
+            Some("idp"),
+            token_data,
+            &vec!["sub".to_string()],
+            Some(&vec!["realm_access.roles".to_string()]),
+        )
+        .unwrap();
+
+        let expected_with_roles = Authentication::builder()
             .token_header(Some(token_header))
             .claims(claims.clone())
             .name(Some("Peter Cold".to_string()))
             .email(Some("peter@example.com".to_string()))
             .subject(subject)
             .principal_type(Some(PrincipalType::Human))
+            .roles(Some(vec![
+                "offline_access".to_string(),
+                "uma_authorization".to_string(),
+                "default-roles-iceberg".to_string(),
+            ]))
             .build();
 
-        assert_eq!(payload, expected_payload);
+        assert_eq!(payload_with_roles, expected_with_roles);
     }
 
     #[test]
@@ -787,7 +1081,13 @@ mod test {
             claims: claims.clone(),
         };
 
-        let payload = get_payload(Some("idp"), token_data, &vec!["sub".to_string()]).unwrap();
+        let payload = extract_authentication(
+            Some("idp"),
+            token_data.clone(),
+            &vec!["sub".to_string()],
+            None,
+        )
+        .unwrap();
 
         let subject = Subject::new(
             Some("idp".to_string()),
@@ -795,14 +1095,39 @@ mod test {
         );
 
         let expected_payload = Authentication::builder()
+            .token_header(Some(token_header.clone()))
+            .claims(claims.clone())
+            .name(Some("service-account-iceberg-machine-client".to_string()))
+            .email(None)
+            .subject(subject.clone())
+            .principal_type(Some(PrincipalType::Application))
+            .build();
+
+        assert_eq!(payload, expected_payload);
+
+        // Test with resource_access.account.roles extraction
+        let payload_with_roles = extract_authentication(
+            Some("idp"),
+            token_data,
+            &vec!["sub".to_string()],
+            Some(&vec!["resource_access.account.roles".to_string()]),
+        )
+        .unwrap();
+
+        let expected_with_roles = Authentication::builder()
             .token_header(Some(token_header))
             .claims(claims.clone())
             .name(Some("service-account-iceberg-machine-client".to_string()))
             .email(None)
             .subject(subject)
             .principal_type(Some(PrincipalType::Application))
+            .roles(Some(vec![
+                "manage-account".to_string(),
+                "manage-account-links".to_string(),
+                "view-profile".to_string(),
+            ]))
             .build();
 
-        assert_eq!(payload, expected_payload);
+        assert_eq!(payload_with_roles, expected_with_roles);
     }
 }
