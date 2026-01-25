@@ -492,7 +492,7 @@ fn get_roles(claims: &serde_json::Value, role_claims: Option<&[String]>) -> Opti
     }
 
     // If we configured role claims but found none, issue a warning
-    tracing::warn!(
+    tracing::debug!(
         "Role claims `{role_claim_paths:?}` were configured but no valid roles were found in the token. \
          Configured paths may be missing or contain non-string values."
     );
