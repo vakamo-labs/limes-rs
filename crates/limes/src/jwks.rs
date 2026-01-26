@@ -159,10 +159,11 @@ impl JWKSWebAuthenticator {
     ///
     /// The field should contain an array of strings or a single string.
     /// Supports nested claims using dot notation, e.g., "resource_access.account.roles"
+    ///
+    /// Empty strings are ignored. If an empty string is provided, role claims will not be set.
     #[must_use]
-    pub fn with_role_claim(mut self, role_claim: String) -> Self {
-        self.role_claims = Some(vec![role_claim]);
-        self
+    pub fn with_role_claim(self, role_claim: String) -> Self {
+        self.with_role_claims(vec![role_claim])
     }
 
     /// Set multiple claims in the token to extract roles from.
@@ -170,12 +171,15 @@ impl JWKSWebAuthenticator {
     /// If multiple claims are set, the first one that is found in the token will be used.
     ///
     /// Supports nested claims using dot notation, e.g., "resource_access.account.roles"
+    ///
+    /// Empty strings are filtered out. If only empty strings are provided, role claims will not be set.
     #[must_use]
     pub fn with_role_claims(mut self, role_claims: Vec<String>) -> Self {
-        if role_claims.is_empty() {
+        let filtered: Vec<String> = role_claims.into_iter().filter(|s| !s.is_empty()).collect();
+        if filtered.is_empty() {
             self.role_claims = None;
         } else {
-            self.role_claims = Some(role_claims);
+            self.role_claims = Some(filtered);
         }
         self
     }
@@ -436,11 +440,16 @@ fn get_email(claims: &serde_json::Value) -> Option<String> {
 /// - If an explicitly empty array is found, continues to the next path
 /// - For single values: returns if the value is a string, otherwise continues
 /// - Returns `None` if no claim paths contain valid string roles
+/// - Logs a debug message if role claims were configured but none were found in the token
 ///
 /// This ensures that malformed or empty role claims don't prevent fallback to alternate
 /// claim paths, while still extracting valid string roles when they exist.
 fn get_roles(claims: &serde_json::Value, role_claims: Option<&[String]>) -> Option<Vec<String>> {
     let role_claim_paths = role_claims?;
+
+    if role_claim_paths.is_empty() {
+        return None;
+    }
 
     for claim_path in role_claim_paths {
         // Split by dots to support nested paths like "resource_access.account.roles"
@@ -481,6 +490,13 @@ fn get_roles(claims: &serde_json::Value, role_claims: Option<&[String]>) -> Opti
         // If the value is neither an array nor a string (e.g., object, number),
         // continue to the next claim path.
     }
+
+    // If we configured role claims but found none, issue a warning
+    tracing::debug!(
+        "Role claims `{role_claim_paths:?}` were configured but no valid roles were found in the token. \
+         Configured paths may be missing or contain non-string values."
+    );
+
     None
 }
 
