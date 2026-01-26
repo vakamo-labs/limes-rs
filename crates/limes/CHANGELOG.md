@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1](https://github.com/vakamo-labs/limes-rs/compare/v0.3.0...v0.3.1) - 2026-01-26
+
+### Added
+
+- Extract Roles from token in `JWKSWebAuthenticator` ([#52](https://github.com/vakamo-labs/limes-rs/pull/52))
+
+### Fixed
+
+- Treat empty role_claim strings as None ([#53](https://github.com/vakamo-labs/limes-rs/pull/53))
+
+### Other
+
+- *(limes)* release v0.3.0 ([#47](https://github.com/vakamo-labs/limes-rs/pull/47))
+
 ## [0.3.0](https://github.com/vakamo-labs/limes-rs/compare/v0.2.1...v0.3.0) - 2025-08-13
 
 ### Other
