@@ -440,7 +440,7 @@ fn get_email(claims: &serde_json::Value) -> Option<String> {
 /// - If an explicitly empty array is found, continues to the next path
 /// - For single values: returns if the value is a string, otherwise continues
 /// - Returns `None` if no claim paths contain valid string roles
-/// - Issues a warning if role claims were configured but none were found in the token
+/// - Logs a debug message if role claims were configured but none were found in the token
 ///
 /// This ensures that malformed or empty role claims don't prevent fallback to alternate
 /// claim paths, while still extracting valid string roles when they exist.
