@@ -153,7 +153,7 @@ mod subject;
 #[cfg(feature = "kubernetes")]
 pub mod kubernetes;
 
-pub use authenticator::{Authentication, Authenticator, PrincipalType};
+pub use authenticator::{Authentication, Authenticator, PrincipalType, TokenAuthenticator};
 pub use chain::{AuthenticatorChain, AuthenticatorChainBuilder, AuthenticatorEnum};
 pub use subject::Subject;
 

@@ -1,4 +1,4 @@
-use crate::Authenticator;
+use crate::authenticator::TokenAuthenticator;
 use crate::error::Error;
 use axum::extract::{Request, State};
 use axum::http::StatusCode;
@@ -15,7 +15,7 @@ use axum_extra::{
 /// - If the authorization header is missing.
 /// - If the authentication fails.
 /// - If no authenticator can handle the token.
-pub async fn authentication_middleware<T: Authenticator>(
+pub async fn authentication_middleware<T: TokenAuthenticator>(
     State(verifiers): State<T>,
     authorization: Option<TypedHeader<Authorization<Bearer>>>,
     mut request: Request,

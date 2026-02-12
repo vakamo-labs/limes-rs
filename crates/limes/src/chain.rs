@@ -1,5 +1,6 @@
 use crate::{
     Authentication, Authenticator,
+    authenticator::TokenAuthenticator,
     error::{Error, Result},
     introspect::{IntrospectionResult, introspect},
 };
@@ -28,12 +29,12 @@ pub enum AuthenticatorEnum {
 #[derive(Debug, Clone)]
 pub struct AuthenticatorChain<T>
 where
-    T: Authenticator,
+    T: TokenAuthenticator,
 {
     authenticators: Vec<T>,
 }
 
-impl<T: Authenticator> AuthenticatorChain<T> {
+impl<T: TokenAuthenticator> AuthenticatorChain<T> {
     #[must_use]
     pub fn builder() -> AuthenticatorChainBuilder<T> {
         AuthenticatorChainBuilder {
@@ -42,9 +43,9 @@ impl<T: Authenticator> AuthenticatorChain<T> {
     }
 }
 
-impl<T> Authenticator for AuthenticatorChain<T>
+impl<T> TokenAuthenticator for AuthenticatorChain<T>
 where
-    T: Authenticator,
+    T: TokenAuthenticator,
 {
     async fn authenticate(&self, token: &str) -> Result<Authentication> {
         let introspect_result = introspect(token);
@@ -58,14 +59,6 @@ where
         Err(Error::NoAuthenticatorCanHandleToken)
     }
 
-    fn idp_id(&self) -> Option<&str> {
-        self.authenticators[0].idp_id()
-    }
-
-    fn idp_id_arc(&self) -> Option<Arc<str>> {
-        self.authenticators[0].idp_id_arc()
-    }
-
     fn can_handle_token(&self, token: &str, introspection_result: &IntrospectionResult) -> bool {
         self.authenticators
             .iter()
@@ -76,14 +69,14 @@ where
 #[derive(Debug, Clone)]
 pub struct AuthenticatorChainBuilder<T>
 where
-    T: Authenticator,
+    T: TokenAuthenticator,
 {
     authenticators: Vec<T>,
 }
 
 impl<T> AuthenticatorChainBuilder<T>
 where
-    T: Authenticator,
+    T: TokenAuthenticator,
 {
     #[must_use]
     pub fn add_authenticator(mut self, authenticator: impl Into<T>) -> Self {
@@ -104,9 +97,11 @@ impl Authenticator for AuthenticatorEnum {
     async fn authenticate(&self, token: &str) -> Result<Authentication> {
         match self {
             #[cfg(feature = "kubernetes")]
-            Self::Kubernetes(authenticator) => authenticator.authenticate(token).await,
+            Self::Kubernetes(authenticator) => {
+                Authenticator::authenticate(authenticator, token).await
+            }
             #[cfg(feature = "jwks")]
-            Self::Jwt(authenticator) => authenticator.authenticate(token).await,
+            Self::Jwt(authenticator) => Authenticator::authenticate(authenticator, token).await,
         }
     }
 
@@ -132,10 +127,12 @@ impl Authenticator for AuthenticatorEnum {
         match self {
             #[cfg(feature = "kubernetes")]
             Self::Kubernetes(authenticator) => {
-                authenticator.can_handle_token(token, introspection_result)
+                Authenticator::can_handle_token(authenticator, token, introspection_result)
             }
             #[cfg(feature = "jwks")]
-            Self::Jwt(authenticator) => authenticator.can_handle_token(token, introspection_result),
+            Self::Jwt(authenticator) => {
+                Authenticator::can_handle_token(authenticator, token, introspection_result)
+            }
         }
     }
 }
