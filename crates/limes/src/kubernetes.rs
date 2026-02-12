@@ -287,7 +287,7 @@ mod test {
         // Invalid audience
         parse_review_status(
             Some(token_review_status.clone()),
-            &["nonexistant-audience".to_string()],
+            &["nonexistent-audience".to_string()],
             Some(Arc::from("kubernetes")),
         )
         .unwrap_err();
@@ -312,5 +312,6 @@ mod test {
             payload.subject().idp_id(),
             Some("my-k8s-cluster".to_string()).as_ref()
         );
+        assert_eq!(payload.idp_id(), Some("my-k8s-cluster"));
     }
 }
