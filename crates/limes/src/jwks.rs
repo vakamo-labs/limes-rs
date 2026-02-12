@@ -51,7 +51,7 @@ const NAME_CLAIM: &str = "name";
 /// - `principal_type`: Is always `Application` currently.
 ///
 pub struct JWKSWebAuthenticator {
-    idp_id: Option<String>,
+    idp_id: Option<Arc<str>>,
     audiences: Vec<String>,
     client: JwksClient<WebSource>,
     issuers: Vec<String>,
@@ -95,7 +95,7 @@ impl JWKSWebAuthenticator {
     #[must_use]
     pub fn set_idp_id(mut self, idp_id: &str) -> Self {
         if !idp_id.is_empty() {
-            self.idp_id = Some(idp_id.to_string());
+            self.idp_id = Some(Arc::from(idp_id));
         }
         self
     }
@@ -269,15 +269,19 @@ impl Authenticator for JWKSWebAuthenticator {
         )?;
 
         extract_authentication(
-            self.idp_id().map(String::as_str),
+            self.idp_id_arc(),
             token_data,
             &self.subject_claim,
             self.role_claims.as_deref(),
         )
     }
 
-    fn idp_id(&self) -> Option<&String> {
-        self.idp_id.as_ref()
+    fn idp_id(&self) -> Option<&str> {
+        self.idp_id.as_deref()
+    }
+
+    fn idp_id_arc(&self) -> Option<Arc<str>> {
+        self.idp_id.clone()
     }
 
     fn can_handle_token(&self, token: &str, introspection_result: &IntrospectionResult) -> bool {
@@ -374,7 +378,7 @@ fn authenticate_jwt(
 }
 
 fn extract_authentication(
-    idp_id: Option<&str>,
+    idp_id: Option<Arc<str>>,
     token_data: jsonwebtoken::TokenData<serde_json::Value>,
     subject_claim: &[String],
     role_claims: Option<&[String]>,
@@ -382,7 +386,7 @@ fn extract_authentication(
     let subject_in_idp = get_subject(&token_data, subject_claim)?;
     let claims = token_data.claims;
 
-    let subject = Subject::new(idp_id.map(ToString::to_string), subject_in_idp);
+    let subject = Subject::new(idp_id.as_ref().map(ToString::to_string), subject_in_idp);
 
     let name = claims.get(NAME_CLAIM).and_then(value_as_string);
     let human_name = parse_human_name(&claims);
@@ -399,6 +403,7 @@ fn extract_authentication(
     let roles = get_roles(&claims, role_claims);
 
     Ok(Authentication::builder()
+        .idp_id(idp_id)
         .token_header(Some(token_data.header))
         .claims(claims.clone())
         .name(name.or(human_name).or(app_name).or(preferred_username))
@@ -633,9 +638,9 @@ mod test {
         };
 
         let payload = extract_authentication(
-            Some("idp"),
+            Some(Arc::from("idp")),
             token_data,
-            &vec!["oid".to_string(), "sub".to_string()],
+            &["oid".to_string(), "sub".to_string()],
             None,
         )
         .unwrap();
@@ -645,6 +650,7 @@ mod test {
             "f621fc83-4ec9-4bf8-bc8d-xxxxxxxxxxxx".to_string(),
         );
         let expected_payload = Authentication::builder()
+            .idp_id(Some(Arc::from("idp")))
             .token_header(Some(token_header))
             .claims(claims.clone())
             .name(Some("ht-testing-lakekeeper-oauth".to_string()))
@@ -694,13 +700,18 @@ mod test {
             claims: claims.clone(),
         };
 
-        let payload =
-            extract_authentication(Some("idp"), token_data, &vec!["oid".to_string()], None)
-                .unwrap();
+        let payload = extract_authentication(
+            Some(Arc::from("idp")),
+            token_data,
+            &["oid".to_string()],
+            None,
+        )
+        .unwrap();
 
         let subject = Subject::new(Some("idp".to_string()), "user-oid".to_string());
 
         let expected_payload = Authentication::builder()
+            .idp_id(Some(Arc::from("idp")))
             .token_header(Some(token_header))
             .claims(claims.clone())
             .name(Some("Peter Cold".to_string()))
@@ -759,9 +770,13 @@ mod test {
             claims: claims.clone(),
         };
 
-        let payload =
-            extract_authentication(Some("idp"), token_data, &vec!["oid".to_string()], None)
-                .unwrap();
+        let payload = extract_authentication(
+            Some(Arc::from("idp")),
+            token_data,
+            &["oid".to_string()],
+            None,
+        )
+        .unwrap();
 
         let subject = Subject::new(
             Some("idp".to_string()),
@@ -769,6 +784,7 @@ mod test {
         );
 
         let expected_payload = Authentication::builder()
+            .idp_id(Some(Arc::from("idp")))
             .token_header(Some(token_header))
             .claims(claims.clone())
             .name(Some("Jack Frost".to_string()))
@@ -786,7 +802,7 @@ mod test {
             "roles": ["admin", "user", "editor"]
         });
 
-        let roles = get_roles(&claims, Some(&vec!["roles".to_string()]));
+        let roles = get_roles(&claims, Some(&["roles".to_string()]));
         assert_eq!(
             roles,
             Some(vec![
@@ -809,7 +825,7 @@ mod test {
 
         let roles = get_roles(
             &claims,
-            Some(&vec!["resource_access.account.roles".to_string()]),
+            Some(&["resource_access.account.roles".to_string()]),
         );
         assert_eq!(
             roles,
@@ -836,7 +852,7 @@ mod test {
         // Should return first match
         let roles = get_roles(
             &claims,
-            Some(&vec![
+            Some(&[
                 "realm_access.roles".to_string(),
                 "resource_access.account.roles".to_string(),
             ]),
@@ -857,7 +873,7 @@ mod test {
         // First path doesn't exist, should fall back to second
         let roles = get_roles(
             &claims,
-            Some(&vec![
+            Some(&[
                 "realm_access.roles".to_string(),
                 "resource_access.account.roles".to_string(),
             ]),
@@ -871,7 +887,7 @@ mod test {
             "other_field": "value"
         });
 
-        let roles = get_roles(&claims, Some(&vec!["roles".to_string()]));
+        let roles = get_roles(&claims, Some(&["roles".to_string()]));
         assert_eq!(roles, None);
     }
 
@@ -881,7 +897,7 @@ mod test {
             "role": "admin"
         });
 
-        let roles = get_roles(&claims, Some(&vec!["role".to_string()]));
+        let roles = get_roles(&claims, Some(&["role".to_string()]));
         assert_eq!(roles, Some(vec!["admin".to_string()]));
     }
 
@@ -893,7 +909,7 @@ mod test {
         });
 
         // Should return None, not Some(vec![]), because no valid strings found
-        let roles = get_roles(&claims, Some(&vec!["roles".to_string()]));
+        let roles = get_roles(&claims, Some(&["roles".to_string()]));
         assert_eq!(roles, None);
     }
 
@@ -905,7 +921,7 @@ mod test {
         });
 
         // Should return None, not Some(vec![]), treating empty like non-existent
-        let roles = get_roles(&claims, Some(&vec!["roles".to_string()]));
+        let roles = get_roles(&claims, Some(&["roles".to_string()]));
         assert_eq!(roles, None);
     }
 
@@ -917,7 +933,7 @@ mod test {
         });
 
         // Should extract only the string values, filtering out non-strings
-        let roles = get_roles(&claims, Some(&vec!["roles".to_string()]));
+        let roles = get_roles(&claims, Some(&["roles".to_string()]));
         assert_eq!(
             roles,
             Some(vec![
@@ -939,10 +955,7 @@ mod test {
         // Should skip first path (no valid strings) and use second path
         let roles = get_roles(
             &claims,
-            Some(&vec![
-                "invalid_roles".to_string(),
-                "valid_roles".to_string(),
-            ]),
+            Some(&["invalid_roles".to_string(), "valid_roles".to_string()]),
         );
         assert_eq!(roles, Some(vec!["user".to_string(), "viewer".to_string()]));
     }
@@ -995,9 +1008,9 @@ mod test {
         };
 
         let payload = extract_authentication(
-            Some("idp"),
+            Some(Arc::from("idp")),
             token_data.clone(),
-            &vec!["sub".to_string()],
+            &["sub".to_string()],
             None,
         )
         .unwrap();
@@ -1008,6 +1021,7 @@ mod test {
         );
 
         let expected_payload = Authentication::builder()
+            .idp_id(Some(Arc::from("idp")))
             .token_header(Some(token_header.clone()))
             .claims(claims.clone())
             .name(Some("Peter Cold".to_string()))
@@ -1020,14 +1034,15 @@ mod test {
 
         // Test with realm_access.roles extraction
         let payload_with_roles = extract_authentication(
-            Some("idp"),
+            Some(Arc::from("idp")),
             token_data,
-            &vec!["sub".to_string()],
-            Some(&vec!["realm_access.roles".to_string()]),
+            &["sub".to_string()],
+            Some(&["realm_access.roles".to_string()]),
         )
         .unwrap();
 
         let expected_with_roles = Authentication::builder()
+            .idp_id(Some(Arc::from("idp")))
             .token_header(Some(token_header))
             .claims(claims.clone())
             .name(Some("Peter Cold".to_string()))
@@ -1098,9 +1113,9 @@ mod test {
         };
 
         let payload = extract_authentication(
-            Some("idp"),
+            Some(Arc::from("idp")),
             token_data.clone(),
-            &vec!["sub".to_string()],
+            &["sub".to_string()],
             None,
         )
         .unwrap();
@@ -1111,6 +1126,7 @@ mod test {
         );
 
         let expected_payload = Authentication::builder()
+            .idp_id(Some(Arc::from("idp")))
             .token_header(Some(token_header.clone()))
             .claims(claims.clone())
             .name(Some("service-account-iceberg-machine-client".to_string()))
@@ -1123,14 +1139,15 @@ mod test {
 
         // Test with resource_access.account.roles extraction
         let payload_with_roles = extract_authentication(
-            Some("idp"),
+            Some(Arc::from("idp")),
             token_data,
-            &vec!["sub".to_string()],
-            Some(&vec!["resource_access.account.roles".to_string()]),
+            &["sub".to_string()],
+            Some(&["resource_access.account.roles".to_string()]),
         )
         .unwrap();
 
         let expected_with_roles = Authentication::builder()
+            .idp_id(Some(Arc::from("idp")))
             .token_header(Some(token_header))
             .claims(claims.clone())
             .name(Some("service-account-iceberg-machine-client".to_string()))

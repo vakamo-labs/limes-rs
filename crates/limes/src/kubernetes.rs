@@ -10,6 +10,7 @@ use k8s_openapi::api::authentication::v1::{
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::PostParams;
+use std::sync::Arc;
 
 #[derive(Clone)]
 /// Authenticator for Kubernetes.
@@ -38,7 +39,7 @@ use kube::api::PostParams;
 /// - `principal_type`: Is always `Application` currently.
 ///
 pub struct KubernetesAuthenticator {
-    idp_id: Option<String>,
+    idp_id: Option<Arc<str>>,
     client: kube::client::Client,
     audiences: Vec<String>,
     issuers: Vec<String>,
@@ -60,7 +61,7 @@ impl KubernetesAuthenticator {
         audiences: Vec<String>,
     ) -> Result<Self> {
         Ok(Self {
-            idp_id: idp_id.map(ToString::to_string),
+            idp_id: idp_id.map(Arc::from),
             client: Self::get_client().await?,
             audiences,
             issuers: vec![],
@@ -82,7 +83,7 @@ impl KubernetesAuthenticator {
         client: kube::client::Client,
     ) -> Result<Self> {
         Ok(Self {
-            idp_id: idp_id.map(ToString::to_string),
+            idp_id: idp_id.map(Arc::from),
             client,
             audiences,
             issuers: vec![],
@@ -144,7 +145,7 @@ impl Authenticator for KubernetesAuthenticator {
             .await
             .map_err(Error::KubernetesTokenReviewError)?;
 
-        parse_review_status(review.status, &self.audiences, self.idp_id.as_deref())
+        parse_review_status(review.status, &self.audiences, self.idp_id_arc())
     }
 
     fn can_handle_token(&self, token: &str, introspection_result: &IntrospectionResult) -> bool {
@@ -165,15 +166,19 @@ impl Authenticator for KubernetesAuthenticator {
         }
     }
 
-    fn idp_id(&self) -> Option<&String> {
-        self.idp_id.as_ref()
+    fn idp_id(&self) -> Option<&str> {
+        self.idp_id.as_deref()
+    }
+
+    fn idp_id_arc(&self) -> Option<Arc<str>> {
+        self.idp_id.clone()
     }
 }
 
 fn parse_review_status(
     token_review: Option<TokenReviewStatus>,
     audiences: &[String],
-    idp_id: Option<&str>,
+    idp_id: Option<Arc<str>>,
 ) -> Result<Authentication> {
     let token_review: TokenReviewStatus = token_review
         .ok_or_else(|| Error::unauthenticated("Kubernetes TokenReview returned no status"))?;
@@ -196,10 +201,11 @@ fn parse_review_status(
         .uid
         .ok_or_else(|| Error::unauthenticated("No UID in kubernetes token review"))?;
 
-    let subject = Subject::new(idp_id.map(ToString::to_string), uid);
+    let subject = Subject::new(idp_id.as_ref().map(ToString::to_string), uid);
 
     let claims = serde_json::to_value(user_info.extra).unwrap_or_default();
     Ok(Authentication::builder()
+        .idp_id(idp_id)
         .name(user_info.username)
         .email(
             claims
@@ -282,7 +288,7 @@ mod test {
         parse_review_status(
             Some(token_review_status.clone()),
             &["nonexistant-audience".to_string()],
-            Some("kubernetes"),
+            Some(Arc::from("kubernetes")),
         )
         .unwrap_err();
 
@@ -290,7 +296,7 @@ mod test {
         let payload = parse_review_status(
             Some(token_review_status),
             &["https://kubernetes.default.svc".to_string()],
-            Some("my-k8s-cluster"),
+            Some(Arc::from("my-k8s-cluster")),
         )
         .unwrap();
 

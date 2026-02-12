@@ -3,6 +3,7 @@ use crate::{
     error::{Error, Result},
     introspect::{IntrospectionResult, introspect},
 };
+use std::sync::Arc;
 
 /// Enum to hold the different authenticators.
 /// This is used for static dispatch in the [`AuthenticatorChain`].
@@ -57,8 +58,12 @@ where
         Err(Error::NoAuthenticatorCanHandleToken)
     }
 
-    fn idp_id(&self) -> Option<&String> {
+    fn idp_id(&self) -> Option<&str> {
         self.authenticators[0].idp_id()
+    }
+
+    fn idp_id_arc(&self) -> Option<Arc<str>> {
+        self.authenticators[0].idp_id_arc()
     }
 
     fn can_handle_token(&self, token: &str, introspection_result: &IntrospectionResult) -> bool {
@@ -105,12 +110,21 @@ impl Authenticator for AuthenticatorEnum {
         }
     }
 
-    fn idp_id(&self) -> Option<&String> {
+    fn idp_id(&self) -> Option<&str> {
         match self {
             #[cfg(feature = "kubernetes")]
             Self::Kubernetes(authenticator) => authenticator.idp_id(),
             #[cfg(feature = "jwks")]
             Self::Jwt(authenticator) => authenticator.idp_id(),
+        }
+    }
+
+    fn idp_id_arc(&self) -> Option<Arc<str>> {
+        match self {
+            #[cfg(feature = "kubernetes")]
+            Self::Kubernetes(authenticator) => authenticator.idp_id_arc(),
+            #[cfg(feature = "jwks")]
+            Self::Jwt(authenticator) => authenticator.idp_id_arc(),
         }
     }
 

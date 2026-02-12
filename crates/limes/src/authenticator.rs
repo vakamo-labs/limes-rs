@@ -2,6 +2,7 @@ use crate::{Subject, error::Result, introspect::IntrospectionResult};
 use core::{future::Future, marker::Sync};
 pub(crate) use jsonwebtoken::Header;
 use std::fmt::Debug;
+use std::sync::Arc;
 use typed_builder::TypedBuilder;
 
 pub trait Authenticator
@@ -21,13 +22,19 @@ where
     fn can_handle_token(&self, token: &str, introspection_result: &IntrospectionResult) -> bool;
 
     /// Returns an id that uniquely identifies the `IdP` this authenticator is for.
-    fn idp_id(&self) -> Option<&String>;
+    fn idp_id(&self) -> Option<&str>;
+
+    /// Returns the `IdP` id as a cheaply cloneable [`Arc<str>`].
+    fn idp_id_arc(&self) -> Option<Arc<str>>;
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, TypedBuilder)]
 /// Information about a successful authentication.
 /// Use [`Authentication::subject()`] for a unique identifier of the user.
 pub struct Authentication {
+    /// Unique identifier of the `IdP` that authenticated this token.
+    #[builder(default)]
+    idp_id: Option<Arc<str>>,
     // --------- Raw token data ---------
     /// Header of the provided token if any.
     /// Not all tokens have a header. JWTs do, but opaque tokens don't.
@@ -58,6 +65,18 @@ pub enum PrincipalType {
 }
 
 impl Authentication {
+    #[must_use]
+    /// Get the unique identifier of the `IdP` that authenticated this token.
+    pub fn idp_id(&self) -> Option<&str> {
+        self.idp_id.as_deref()
+    }
+
+    #[must_use]
+    /// Get the `IdP` id as a cheaply cloneable [`Arc<str>`].
+    pub fn idp_id_arc(&self) -> Option<Arc<str>> {
+        self.idp_id.clone()
+    }
+
     #[must_use]
     /// Get the token header if it exists.
     pub fn token_header(&self) -> Option<&Header> {

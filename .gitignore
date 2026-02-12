@@ -2,6 +2,7 @@ local
 .DS_Store
 .idea/
 Cargo.lock
+.claude
 
 .vscode
 
