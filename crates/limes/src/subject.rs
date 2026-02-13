@@ -6,9 +6,9 @@ use crate::error::{Error, Result};
 #[derive(Debug, PartialEq, Eq, Clone, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "valuable", derive(valuable::Valuable))]
 pub struct Subject {
-    #[valuable(rename = "id")]
+    #[cfg_attr(feature = "valuable", valuable(rename = "id"))]
     sub: String,
-    #[valuable(rename = "idp")]
+    #[cfg_attr(feature = "valuable", valuable(rename = "idp"))]
     idp_id: Option<String>,
 }
 
