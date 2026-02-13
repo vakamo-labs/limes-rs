@@ -1,5 +1,5 @@
 use crate::{Subject, error::Result, introspect::IntrospectionResult};
-use core::{future::Future, marker::Sync};
+use core::future::Future;
 pub(crate) use jsonwebtoken::Header;
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -11,7 +11,7 @@ use typed_builder::TypedBuilder;
 /// suitable for composite types like [`AuthenticatorChain`](`crate::AuthenticatorChain`)
 /// that hold multiple [`Authenticator`]s and cannot meaningfully return a single `idp_id`.
 ///
-/// Every [`Authenticator`] automatically implements `TokenAuthenticator` via a blanket impl.
+/// Every [`Authenticator`] is also a `TokenAuthenticator` (supertrait).
 /// Implement [`Authenticator`] directly when building a concrete, single-IdP authenticator.
 pub trait TokenAuthenticator
 where
@@ -30,41 +30,13 @@ where
     fn can_handle_token(&self, token: &str, introspection_result: &IntrospectionResult) -> bool;
 }
 
-impl<T> TokenAuthenticator for T
-where
-    T: Authenticator,
-{
-    fn authenticate(&self, token: &str) -> impl Future<Output = Result<Authentication>> + Send {
-        Authenticator::authenticate(self, token)
-    }
-
-    fn can_handle_token(&self, token: &str, introspection_result: &IntrospectionResult) -> bool {
-        Authenticator::can_handle_token(self, token, introspection_result)
-    }
-}
-
 /// Authenticate tokens for a specific Identity Provider.
 ///
 /// Extends [`TokenAuthenticator`] with an `idp_id` that uniquely identifies the IdP
 /// this authenticator is bound to. Implement this trait for concrete, single-IdP
 /// authenticators (e.g. [`JWKSWebAuthenticator`](`crate::jwks::JWKSWebAuthenticator`),
 /// [`KubernetesAuthenticator`](`crate::kubernetes::KubernetesAuthenticator`)).
-pub trait Authenticator
-where
-    Self: Send + Sync + Clone,
-{
-    /// Authenticate a token. This must validate the tokens signature and claims.
-    /// For opaque tokens, handlers may connect to the `IdP` to validate the token.
-    ///
-    /// # Errors
-    /// - Token is not valid.
-    fn authenticate(&self, token: &str) -> impl Future<Output = Result<Authentication>> + Send;
-
-    /// Check if the authenticator can handle the token.
-    /// This is used in the [`AuthenticatorChain`](`crate::AuthenticatorChain`) to determine which authenticator to use.
-    /// This should be a quick check that doesn't involve cryptographic operations.
-    fn can_handle_token(&self, token: &str, introspection_result: &IntrospectionResult) -> bool;
-
+pub trait Authenticator: TokenAuthenticator {
     /// Returns an id that uniquely identifies the `IdP` this authenticator is for.
     fn idp_id(&self) -> Option<&str>;
 

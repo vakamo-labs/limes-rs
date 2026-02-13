@@ -2,7 +2,7 @@
 
 use crate::introspect::IntrospectionResult;
 use crate::{
-    Authentication, Authenticator, Subject,
+    Authentication, Authenticator, Subject, TokenAuthenticator,
     error::{Error, Result},
 };
 use k8s_openapi::api::authentication::v1::{
@@ -103,7 +103,7 @@ impl KubernetesAuthenticator {
     }
 }
 
-impl Authenticator for KubernetesAuthenticator {
+impl TokenAuthenticator for KubernetesAuthenticator {
     async fn authenticate(&self, token: &str) -> Result<Authentication> {
         // If an issuer is set, the token must be JWT and the issuer must match
         if !self.issuers.is_empty() {
@@ -165,7 +165,9 @@ impl Authenticator for KubernetesAuthenticator {
             }
         }
     }
+}
 
+impl Authenticator for KubernetesAuthenticator {
     fn idp_id(&self) -> Option<&str> {
         self.idp_id.as_deref()
     }

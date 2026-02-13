@@ -11,6 +11,7 @@ check-clippy:
 	cargo clippy --workspace -- -D warnings
 	cargo clippy --workspace --no-default-features -- -D warnings
 	cargo clippy --workspace --features "all" -- -D warnings
+	cargo clippy -p limes --no-default-features -- -D warnings
 
 
 check-cargo-sort:

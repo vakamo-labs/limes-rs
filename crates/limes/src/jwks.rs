@@ -2,7 +2,7 @@
 
 use crate::introspect::IntrospectionResult;
 use crate::{
-    Authentication, Authenticator, PrincipalType, Subject,
+    Authentication, Authenticator, PrincipalType, Subject, TokenAuthenticator,
     error::{Error, Result},
 };
 use jsonwebtoken::{Algorithm, DecodingKey, Header, Validation};
@@ -244,7 +244,7 @@ impl JWKSWebAuthenticator {
     }
 }
 
-impl Authenticator for JWKSWebAuthenticator {
+impl TokenAuthenticator for JWKSWebAuthenticator {
     async fn authenticate(&self, token: &str) -> Result<Authentication> {
         let header = decode_jwt_header(token)?;
         let key_id = require_jwt_key_id(&header)?;
@@ -276,14 +276,6 @@ impl Authenticator for JWKSWebAuthenticator {
         )
     }
 
-    fn idp_id(&self) -> Option<&str> {
-        self.idp_id.as_deref()
-    }
-
-    fn idp_id_arc(&self) -> Option<Arc<str>> {
-        self.idp_id.clone()
-    }
-
     fn can_handle_token(&self, token: &str, introspection_result: &IntrospectionResult) -> bool {
         if token.is_empty() {
             return false;
@@ -300,6 +292,16 @@ impl Authenticator for JWKSWebAuthenticator {
             }
             IntrospectionResult::Unknown => false,
         }
+    }
+}
+
+impl Authenticator for JWKSWebAuthenticator {
+    fn idp_id(&self) -> Option<&str> {
+        self.idp_id.as_deref()
+    }
+
+    fn idp_id_arc(&self) -> Option<Arc<str>> {
+        self.idp_id.clone()
     }
 }
 
