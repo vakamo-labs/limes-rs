@@ -13,7 +13,7 @@ Limes is a multi-tenant capable Authentication middleware for OAuth2.0 and Open 
 """
 
 [features]
-all = ["kubernetes", "rustls-tls", "jwks", "axum"]
+all = ["kubernetes", "rustls-tls", "jwks", "axum", "valuable"]
 default = ["rustls-tls", "jwks", "aws-lc-rs"]
 kubernetes = ["kube", "k8s-openapi"]
 rustls-tls = [
@@ -26,6 +26,7 @@ aws-lc-rs = ["kube?/aws-lc-rs"]
 ring = ["kube?/ring"]
 jwks = ["jwks_client_rs"]
 axum = ["dep:axum", "axum-extra"]
+valuable = ["dep:valuable"]
 
 [dependencies]
 axum = { version = "0.8", optional = true }
@@ -45,6 +46,7 @@ tracing = { version = "^0.1", features = ["attributes"] }
 trait-variant = "0.1.2"
 typed-builder = "0.23"
 url = { version = "2.5", features = ["serde"] }
+valuable = { version = "0.1.1", optional = true, features = ["derive"] }
 
 [dev-dependencies]
 axum = { version = "0.8" }

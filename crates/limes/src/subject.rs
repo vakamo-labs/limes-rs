@@ -4,8 +4,11 @@ use crate::error::{Error, Result};
 
 /// A subject is a unique identifier for a user.
 #[derive(Debug, PartialEq, Eq, Clone, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "valuable", derive(valuable::Valuable))]
 pub struct Subject {
+    #[valuable(rename = "id")]
     sub: String,
+    #[valuable(rename = "idp")]
     idp_id: Option<String>,
 }
 
