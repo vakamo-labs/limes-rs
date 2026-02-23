@@ -83,7 +83,7 @@ where
     fn idp_ids(&self) -> Vec<Option<&str>> {
         self.authenticators
             .iter()
-            .map(|a| a.idp_id().map(String::as_str))
+            .flat_map(Authenticator::idp_ids)
             .collect()
     }
 
