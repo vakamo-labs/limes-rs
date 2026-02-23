@@ -73,13 +73,6 @@ where
     /// The returned vector preserves the order of authenticators; each element is
     /// either `Some(&str)` referencing the authenticator's `String` id, or `None`
     /// if that authenticator has no id.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// // Given an existing `chain: AuthenticatorChain<_>`, obtain all idp ids:
-    /// let ids: Vec<Option<&str>> = chain.idp_ids();
-    /// ```
     fn idp_ids(&self) -> Vec<Option<&str>> {
         self.authenticators
             .iter()
@@ -91,14 +84,6 @@ where
     ///
     /// Checks each authenticator in the chain with the provided introspection result and
     /// returns `true` as soon as one reports it can handle the token.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// // Assuming `chain` is an AuthenticatorChain and `introspect` is an IntrospectionResult:
-    /// let token = "eyJ...";
-    /// let can_handle = chain.can_handle_token(token, &introspect);
-    /// ```
     fn can_handle_token(&self, token: &str, introspection_result: &IntrospectionResult) -> bool {
         self.authenticators
             .iter()

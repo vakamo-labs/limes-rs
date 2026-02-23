@@ -33,16 +33,6 @@ where
     ///
     /// A `Vec<Option<&str>>` where each element is the IdP identifier for one authenticator in the chain,
     /// or `None` when an authenticator does not have an IdP identifier.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// // Standalone authenticator with an idp_id of "example"
-    /// struct A; impl A { fn idp_id(&self) -> Option<String> { Some("example".to_string()) } }
-    /// impl A { fn idp_ids(&self) -> Vec<Option<&str>> { vec![self.idp_id().map(String::as_str)] } }
-    /// let a = A;
-    /// assert_eq!(a.idp_ids(), vec![Some("example")]);
-    /// ```
     fn idp_ids(&self) -> Vec<Option<&str>> {
         vec![self.idp_id().map(String::as_str)]
     }
