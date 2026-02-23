@@ -45,6 +45,11 @@ impl<T> Authenticator for AuthenticatorChain<T>
 where
     T: Authenticator,
 {
+    /// Authenticate a token using the first authenticator in the chain that can handle it.
+    ///
+    /// # Errors
+    /// - No authenticator in the chain can handle the token.
+    /// - The matching authenticator rejects the token.
     async fn authenticate(&self, token: &str) -> Result<Authentication> {
         let introspect_result = introspect(token);
 
@@ -57,22 +62,13 @@ where
         Err(Error::NoAuthenticatorCanHandleToken)
     }
 
-    /// Get the identity provider ID from the first authenticator in the chain, if present.
-    ///
-    /// Returns the first authenticator's `idp_id()` value as `Option<&String>`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the chain contains no authenticators.
+    /// Returns the `idp_id` of the first authenticator in the chain, or `None` if the chain is empty.
     fn idp_id(&self) -> Option<&String> {
-        self.authenticators[0].idp_id()
+        self.authenticators.first().and_then(Authenticator::idp_id)
     }
 
-    /// Returns a vector of each contained authenticator's `idp_id` as `Option<&str>`.
-    ///
-    /// The returned vector preserves the order of authenticators; each element is
-    /// either `Some(&str)` referencing the authenticator's `String` id, or `None`
-    /// if that authenticator has no id.
+    /// Returns the `idp_id` of every authenticator in the chain, in order.
+    /// Each element is `None` for authenticators that have no `idp_id` set.
     fn idp_ids(&self) -> Vec<Option<&str>> {
         self.authenticators
             .iter()
@@ -80,10 +76,7 @@ where
             .collect()
     }
 
-    /// Returns whether any contained authenticator can handle the given token.
-    ///
-    /// Checks each authenticator in the chain with the provided introspection result and
-    /// returns `true` as soon as one reports it can handle the token.
+    /// Returns `true` if any authenticator in the chain can handle the token.
     fn can_handle_token(&self, token: &str, introspection_result: &IntrospectionResult) -> bool {
         self.authenticators
             .iter()
