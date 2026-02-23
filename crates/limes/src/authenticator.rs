@@ -24,43 +24,24 @@ where
     fn idp_id(&self) -> Option<&String>;
 
     /// Collects the IdP identifier(s) associated with this authenticator.
-    
     ///
-    
     /// By default this yields a single-element vector containing the result of `self.idp_id()`
-    
     /// (converted to a `&str`) for a standalone authenticator. Implementations that represent
-    
     /// a chain of authenticators should return one element per child authenticator in chain order.
-    
     ///
-    
     /// # Returns
-    
     ///
-    
     /// A `Vec<Option<&str>>` where each element is the IdP identifier for one authenticator in the chain,
-    
     /// or `None` when an authenticator does not have an IdP identifier.
-    
     ///
-    
     /// # Examples
-    
     ///
-    
     /// ```
-    
     /// // Standalone authenticator with an idp_id of "example"
-    
     /// struct A; impl A { fn idp_id(&self) -> Option<String> { Some("example".to_string()) } }
-    
     /// impl A { fn idp_ids(&self) -> Vec<Option<&str>> { vec![self.idp_id().map(String::as_str)] } }
-    
     /// let a = A;
-    
     /// assert_eq!(a.idp_ids(), vec![Some("example")]);
-    
     /// ```
     fn idp_ids(&self) -> Vec<Option<&str>> {
         vec![self.idp_id().map(String::as_str)]

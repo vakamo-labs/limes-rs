@@ -635,7 +635,7 @@ mod test {
         let payload = extract_authentication(
             Some("idp"),
             token_data,
-            &vec!["oid".to_string(), "sub".to_string()],
+            &["oid".to_string(), "sub".to_string()],
             None,
         )
         .unwrap();
@@ -695,8 +695,7 @@ mod test {
         };
 
         let payload =
-            extract_authentication(Some("idp"), token_data, &vec!["oid".to_string()], None)
-                .unwrap();
+            extract_authentication(Some("idp"), token_data, &["oid".to_string()], None).unwrap();
 
         let subject = Subject::new(Some("idp".to_string()), "user-oid".to_string());
 
@@ -760,8 +759,7 @@ mod test {
         };
 
         let payload =
-            extract_authentication(Some("idp"), token_data, &vec!["oid".to_string()], None)
-                .unwrap();
+            extract_authentication(Some("idp"), token_data, &["oid".to_string()], None).unwrap();
 
         let subject = Subject::new(
             Some("idp".to_string()),
@@ -786,7 +784,7 @@ mod test {
             "roles": ["admin", "user", "editor"]
         });
 
-        let roles = get_roles(&claims, Some(&vec!["roles".to_string()]));
+        let roles = get_roles(&claims, Some(&["roles".to_string()]));
         assert_eq!(
             roles,
             Some(vec![
@@ -809,7 +807,7 @@ mod test {
 
         let roles = get_roles(
             &claims,
-            Some(&vec!["resource_access.account.roles".to_string()]),
+            Some(&["resource_access.account.roles".to_string()]),
         );
         assert_eq!(
             roles,
@@ -836,7 +834,7 @@ mod test {
         // Should return first match
         let roles = get_roles(
             &claims,
-            Some(&vec![
+            Some(&[
                 "realm_access.roles".to_string(),
                 "resource_access.account.roles".to_string(),
             ]),
@@ -857,7 +855,7 @@ mod test {
         // First path doesn't exist, should fall back to second
         let roles = get_roles(
             &claims,
-            Some(&vec![
+            Some(&[
                 "realm_access.roles".to_string(),
                 "resource_access.account.roles".to_string(),
             ]),
@@ -871,7 +869,7 @@ mod test {
             "other_field": "value"
         });
 
-        let roles = get_roles(&claims, Some(&vec!["roles".to_string()]));
+        let roles = get_roles(&claims, Some(&["roles".to_string()]));
         assert_eq!(roles, None);
     }
 
@@ -881,7 +879,7 @@ mod test {
             "role": "admin"
         });
 
-        let roles = get_roles(&claims, Some(&vec!["role".to_string()]));
+        let roles = get_roles(&claims, Some(&["role".to_string()]));
         assert_eq!(roles, Some(vec!["admin".to_string()]));
     }
 
@@ -893,7 +891,7 @@ mod test {
         });
 
         // Should return None, not Some(vec![]), because no valid strings found
-        let roles = get_roles(&claims, Some(&vec!["roles".to_string()]));
+        let roles = get_roles(&claims, Some(&["roles".to_string()]));
         assert_eq!(roles, None);
     }
 
@@ -905,7 +903,7 @@ mod test {
         });
 
         // Should return None, not Some(vec![]), treating empty like non-existent
-        let roles = get_roles(&claims, Some(&vec!["roles".to_string()]));
+        let roles = get_roles(&claims, Some(&["roles".to_string()]));
         assert_eq!(roles, None);
     }
 
@@ -917,7 +915,7 @@ mod test {
         });
 
         // Should extract only the string values, filtering out non-strings
-        let roles = get_roles(&claims, Some(&vec!["roles".to_string()]));
+        let roles = get_roles(&claims, Some(&["roles".to_string()]));
         assert_eq!(
             roles,
             Some(vec![
@@ -939,10 +937,7 @@ mod test {
         // Should skip first path (no valid strings) and use second path
         let roles = get_roles(
             &claims,
-            Some(&vec![
-                "invalid_roles".to_string(),
-                "valid_roles".to_string(),
-            ]),
+            Some(&["invalid_roles".to_string(), "valid_roles".to_string()]),
         );
         assert_eq!(roles, Some(vec!["user".to_string(), "viewer".to_string()]));
     }
@@ -994,13 +989,9 @@ mod test {
             claims: claims.clone(),
         };
 
-        let payload = extract_authentication(
-            Some("idp"),
-            token_data.clone(),
-            &vec!["sub".to_string()],
-            None,
-        )
-        .unwrap();
+        let payload =
+            extract_authentication(Some("idp"), token_data.clone(), &["sub".to_string()], None)
+                .unwrap();
 
         let subject = Subject::new(
             Some("idp".to_string()),
@@ -1022,8 +1013,8 @@ mod test {
         let payload_with_roles = extract_authentication(
             Some("idp"),
             token_data,
-            &vec!["sub".to_string()],
-            Some(&vec!["realm_access.roles".to_string()]),
+            &["sub".to_string()],
+            Some(&["realm_access.roles".to_string()]),
         )
         .unwrap();
 
@@ -1097,13 +1088,9 @@ mod test {
             claims: claims.clone(),
         };
 
-        let payload = extract_authentication(
-            Some("idp"),
-            token_data.clone(),
-            &vec!["sub".to_string()],
-            None,
-        )
-        .unwrap();
+        let payload =
+            extract_authentication(Some("idp"), token_data.clone(), &["sub".to_string()], None)
+                .unwrap();
 
         let subject = Subject::new(
             Some("idp".to_string()),
@@ -1125,8 +1112,8 @@ mod test {
         let payload_with_roles = extract_authentication(
             Some("idp"),
             token_data,
-            &vec!["sub".to_string()],
-            Some(&vec!["resource_access.account.roles".to_string()]),
+            &["sub".to_string()],
+            Some(&["resource_access.account.roles".to_string()]),
         )
         .unwrap();
 
