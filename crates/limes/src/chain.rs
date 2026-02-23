@@ -45,6 +45,11 @@ impl<T> Authenticator for AuthenticatorChain<T>
 where
     T: Authenticator,
 {
+    /// Authenticate a token using the first authenticator in the chain that can handle it.
+    ///
+    /// # Errors
+    /// - No authenticator in the chain can handle the token.
+    /// - The matching authenticator rejects the token.
     async fn authenticate(&self, token: &str) -> Result<Authentication> {
         let introspect_result = introspect(token);
 
@@ -57,10 +62,21 @@ where
         Err(Error::NoAuthenticatorCanHandleToken)
     }
 
+    /// Returns the `idp_id` of the first authenticator in the chain, or `None` if the chain is empty.
     fn idp_id(&self) -> Option<&String> {
-        self.authenticators[0].idp_id()
+        self.authenticators.first().and_then(Authenticator::idp_id)
     }
 
+    /// Returns the `idp_id` of every authenticator in the chain, in order.
+    /// Each element is `None` for authenticators that have no `idp_id` set.
+    fn idp_ids(&self) -> Vec<Option<&str>> {
+        self.authenticators
+            .iter()
+            .flat_map(Authenticator::idp_ids)
+            .collect()
+    }
+
+    /// Returns `true` if any authenticator in the chain can handle the token.
     fn can_handle_token(&self, token: &str, introspection_result: &IntrospectionResult) -> bool {
         self.authenticators
             .iter()
