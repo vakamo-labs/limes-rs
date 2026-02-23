@@ -22,6 +22,13 @@ where
 
     /// Returns an id that uniquely identifies the `IdP` this authenticator is for.
     fn idp_id(&self) -> Option<&String>;
+
+    /// Returns the idp IDs of this authenticator.
+    /// For a single authenticator, this returns a one-element vec containing [`Self::idp_id()`].
+    /// For a chained authenticator, this returns the idp IDs of all children.
+    fn idp_ids(&self) -> Vec<Option<&str>> {
+        vec![self.idp_id().map(String::as_str)]
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, TypedBuilder)]

@@ -2,7 +2,7 @@ local
 .DS_Store
 .idea/
 Cargo.lock
-
+.claude
 .vscode
 
 # Created by https://www.toptal.com/developers/gitignore/api/rust,rust-analyzer,visualstudiocode

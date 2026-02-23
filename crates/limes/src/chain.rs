@@ -61,6 +61,13 @@ where
         self.authenticators[0].idp_id()
     }
 
+    fn idp_ids(&self) -> Vec<Option<&str>> {
+        self.authenticators
+            .iter()
+            .map(|a| a.idp_id().map(String::as_str))
+            .collect()
+    }
+
     fn can_handle_token(&self, token: &str, introspection_result: &IntrospectionResult) -> bool {
         self.authenticators
             .iter()
