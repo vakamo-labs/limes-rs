@@ -131,7 +131,7 @@ impl Authentication {
     #[must_use]
     /// Get the IdP identifier of the subject, if present.
     /// This is a convenience accessor that maps the `Option<&String>` returned by
-    /// the [`Authenticator`] trait's `idp_id` to `Option<&str>`.
+    /// [`Subject::idp_id`] to `Option<&str>`.
     pub fn idp_id(&self) -> Option<&str> {
         self.subject().idp_id().map(std::string::String::as_str)
     }
