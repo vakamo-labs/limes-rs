@@ -81,6 +81,15 @@ impl Audience {
     }
 }
 
+/// Parse the `aud` claim from a JSON value into a `HashSet<String>`.
+/// Handles both single-string (`"aud": "app"`) and array (`"aud": ["app1", "app2"]`) forms.
+pub(crate) fn parse_aud(value: Option<&serde_json::Value>) -> HashSet<String> {
+    value
+        .and_then(|v| serde_json::from_value::<Audience>(v.clone()).ok())
+        .map(Audience::into_set)
+        .unwrap_or_default()
+}
+
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum Issuer {
@@ -101,6 +110,29 @@ impl Issuer {
 mod tests {
     use super::*;
     use tracing_test::traced_test;
+
+    #[test]
+    fn test_parse_aud_single_string() {
+        let aud = serde_json::json!("my-app");
+        let parsed = parse_aud(Some(&aud));
+        assert_eq!(parsed, HashSet::from(["my-app".to_string()]));
+    }
+
+    #[test]
+    fn test_parse_aud_array() {
+        let aud = serde_json::json!(["my-app", "other-app"]);
+        let parsed = parse_aud(Some(&aud));
+        assert_eq!(
+            parsed,
+            HashSet::from(["my-app".to_string(), "other-app".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_parse_aud_none() {
+        let parsed = parse_aud(None);
+        assert_eq!(parsed, HashSet::new());
+    }
 
     #[test]
     #[traced_test]

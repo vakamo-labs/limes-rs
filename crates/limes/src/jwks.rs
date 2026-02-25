@@ -17,6 +17,7 @@ const SUBJECT_CLAIM: &str = "sub";
 const IDTYP_CLAIM: &str = "idtyp";
 const APP_DISPLAYNAME_CLAIM: &str = "app_displayname";
 const NAME_CLAIM: &str = "name";
+const AUD_CLAIM: &str = "aud";
 
 #[derive(Clone)]
 /// Validate JWT tokens using JWKS keys fetched from a remote server.
@@ -398,6 +399,8 @@ fn extract_authentication(
 
     let roles = get_roles(&claims, role_claims);
 
+    let audiences = crate::introspect::parse_aud(claims.get(AUD_CLAIM));
+
     Ok(Authentication::builder()
         .token_header(Some(token_data.header))
         .claims(claims.clone())
@@ -406,6 +409,7 @@ fn extract_authentication(
         .subject(subject)
         .principal_type(principal_type)
         .roles(roles)
+        .audiences(audiences)
         .build())
 }
 
@@ -577,6 +581,7 @@ fn value_as_string(value: &serde_json::Value) -> Option<String> {
 mod test {
     use super::*;
     use pretty_assertions::assert_eq;
+    use std::collections::HashSet;
 
     #[test]
     fn test_parse_scope_multi() {
@@ -651,6 +656,7 @@ mod test {
             .email(None)
             .subject(subject)
             .principal_type(Some(PrincipalType::Application))
+            .audiences(HashSet::from(["00000003-0000-0000-c000-000000000000".to_string()]))
             .build();
 
         assert_eq!(payload, expected_payload);
@@ -706,6 +712,7 @@ mod test {
             .email(Some("peter@example.com".to_string()))
             .subject(subject)
             .principal_type(Some(PrincipalType::Human))
+            .audiences(HashSet::from(["api://xyz".to_string()]))
             .build();
 
         assert_eq!(payload, expected_payload);
@@ -773,6 +780,7 @@ mod test {
             .email(Some("jack@example.com".to_string()))
             .subject(subject)
             .principal_type(Some(PrincipalType::Human))
+            .audiences(HashSet::from(["00000003-0000-0000-c000-000000000000".to_string()]))
             .build();
 
         assert_eq!(payload, expected_payload);
@@ -1005,6 +1013,7 @@ mod test {
             .email(Some("peter@example.com".to_string()))
             .subject(subject.clone())
             .principal_type(Some(PrincipalType::Human))
+            .audiences(HashSet::from(["account".to_string()]))
             .build();
 
         assert_eq!(payload, expected_payload);
@@ -1030,6 +1039,7 @@ mod test {
                 "uma_authorization".to_string(),
                 "default-roles-iceberg".to_string(),
             ]))
+            .audiences(HashSet::from(["account".to_string()]))
             .build();
 
         assert_eq!(payload_with_roles, expected_with_roles);
@@ -1104,6 +1114,10 @@ mod test {
             .email(None)
             .subject(subject.clone())
             .principal_type(Some(PrincipalType::Application))
+            .audiences(HashSet::from([
+                "iceberg-catalog".to_string(),
+                "account".to_string(),
+            ]))
             .build();
 
         assert_eq!(payload, expected_payload);
@@ -1128,6 +1142,10 @@ mod test {
                 "manage-account".to_string(),
                 "manage-account-links".to_string(),
                 "view-profile".to_string(),
+            ]))
+            .audiences(HashSet::from([
+                "iceberg-catalog".to_string(),
+                "account".to_string(),
             ]))
             .build();
 

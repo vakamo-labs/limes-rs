@@ -1,6 +1,7 @@
 use crate::{Subject, error::Result, introspect::IntrospectionResult};
 use core::{future::Future, marker::Sync};
 pub(crate) use jsonwebtoken::Header;
+use std::collections::HashSet;
 use std::fmt::Debug;
 use typed_builder::TypedBuilder;
 
@@ -62,6 +63,9 @@ pub struct Authentication {
     /// Roles of the user extracted from the token if any.
     #[builder(default)]
     roles: Option<Vec<String>>,
+    /// Audiences of the token.
+    #[builder(default)]
+    audiences: HashSet<String>,
 }
 
 #[derive(Debug, PartialEq, Eq, Copy, Clone, Hash)]
@@ -116,5 +120,16 @@ impl Authentication {
     #[must_use]
     pub fn roles(&self) -> Option<&[String]> {
         self.roles.as_deref()
+    }
+
+    #[must_use]
+    /// Get the audiences of the token.
+    pub fn audiences(&self) -> &HashSet<String> {
+        &self.audiences
+    }
+
+    #[must_use]
+    pub fn idp_id(&self) -> Option<&str> {
+        self.subject().idp_id().map(|x| x.as_str())
     }
 }

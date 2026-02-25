@@ -179,7 +179,8 @@ fn parse_review_status(
         .ok_or_else(|| Error::unauthenticated("Kubernetes TokenReview returned no status"))?;
 
     // Validate Audience
-    validate_audience(audiences, &token_review.audiences.unwrap_or_default())?;
+    let actual_audiences = token_review.audiences.unwrap_or_default();
+    validate_audience(audiences, &actual_audiences)?;
 
     // Raise k8s error
     if let Some(error) = token_review.error {
@@ -210,6 +211,7 @@ fn parse_review_status(
         .principal_type(Some(crate::PrincipalType::Application))
         .token_header(None)
         .claims(claims)
+        .audiences(actual_audiences.into_iter().collect())
         .build())
 }
 
