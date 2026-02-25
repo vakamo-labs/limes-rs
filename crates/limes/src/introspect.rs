@@ -81,6 +81,15 @@ impl Audience {
     }
 }
 
+/// Parse the `aud` claim from a JSON value into a `HashSet<String>`.
+/// Handles both single-string (`"aud": "app"`) and array (`"aud": ["app1", "app2"]`) forms.
+pub(crate) fn parse_aud(value: Option<&serde_json::Value>) -> HashSet<String> {
+    value
+        .and_then(|v| Audience::deserialize(v).ok())
+        .map(Audience::into_set)
+        .unwrap_or_default()
+}
+
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum Issuer {
@@ -103,6 +112,29 @@ mod tests {
     use tracing_test::traced_test;
 
     #[test]
+    fn test_parse_aud_single_string() {
+        let aud = serde_json::json!("my-app");
+        let parsed = parse_aud(Some(&aud));
+        assert_eq!(parsed, HashSet::from(["my-app".to_string()]));
+    }
+
+    #[test]
+    fn test_parse_aud_array() {
+        let aud = serde_json::json!(["my-app", "other-app"]);
+        let parsed = parse_aud(Some(&aud));
+        assert_eq!(
+            parsed,
+            HashSet::from(["my-app".to_string(), "other-app".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_parse_aud_none() {
+        let parsed = parse_aud(None);
+        assert_eq!(parsed, HashSet::new());
+    }
+
+    #[test]
     #[traced_test]
     fn test_introspect_jwt_bearer() {
         let token = "eyJhbGciOiJSUzI1NiIsInR5cCIgOiAiSldUIiwia2lkIiA6ICJGSXdWb1hsQnlEd1hEWEFyOW5QaU44aUlpb05hc2lIVjhKWlFIMHQ2TDZvIn0.eyJleHAiOjE3NDA0ODk0MzgsImlhdCI6MTc0MDQ4OTEzOCwiYXV0aF90aW1lIjoxNzQwNDg5MTM4LCJqdGkiOiI3NTdlZjljNS0xYTE3LTRhNzEtYjVkMS1lZTg5NGFiY2VhZGQiLCJpc3MiOiJodHRwOi8vbG9jYWxob3N0OjMwMDgwL3JlYWxtcy9pY2ViZXJnIiwiYXVkIjpbImxha2VrZWVwZXIiLCJhY2NvdW50Il0sInN1YiI6ImNmYjU1YmY2LWZjYmItNGExZS1iZmVjLTMwYzY2NDliNTJmOCIsInR5cCI6IkJlYXJlciIsImF6cCI6Imxha2VrZWVwZXIiLCJzaWQiOiJlNzM5ODg4OS0xYzQ4LTRlYmQtOTUxZi05YWRmMGU1NjI5ZjMiLCJhY3IiOiIxIiwiYWxsb3dlZC1vcmlnaW5zIjpbIioiXSwicmVhbG1fYWNjZXNzIjp7InJvbGVzIjpbIm9mZmxpbmVfYWNjZXNzIiwidW1hX2F1dGhvcml6YXRpb24iLCJkZWZhdWx0LXJvbGVzLWljZWJlcmciXX0sInJlc291cmNlX2FjY2VzcyI6eyJhY2NvdW50Ijp7InJvbGVzIjpbIm1hbmFnZS1hY2NvdW50IiwibWFuYWdlLWFjY291bnQtbGlua3MiLCJ2aWV3LXByb2ZpbGUiXX19LCJzY29wZSI6Im9wZW5pZCBlbWFpbCBwcm9maWxlIiwiZW1haWxfdmVyaWZpZWQiOnRydWUsIm5hbWUiOiJQZXRlciBDb2xkIiwicHJlZmVycmVkX3VzZXJuYW1lIjoicGV0ZXIiLCJnaXZlbl9uYW1lIjoiUGV0ZXIiLCJmYW1pbHlfbmFtZSI6IkNvbGQiLCJlbWFpbCI6InBldGVyQGV4YW1wbGUuY29tIn0.JDjjQbVklK3v7XQqFwxpzaXZylgQSjszdbSx2UUx6-XKSNMa0o64TGNVkpRioj--JJ5ZSGtMVyioT_hMnT_hTUayStZNZ1Is80n3Pg11kh8qam6mZHvmqkTg4WXYkekGoOc1_SVDsI6QI084Ut4eBKPG_XtHP2ruTR_Y6WLbmQEFMkSPTB-TULHWZ8elwuGMWdAAV60oGQgvid4FHHwJyYXJLyb2NC3Q4XSb_7sS_cZIEWgO6hRUb9VYQq1tof0NT6WegUGbzhbSTfEOOEGJ3-3bquAoxskvOXTeVB7nzCw6e8KBnZS1PYtoiCR_9fp_Ag_7xukcgrfibn9k-BlN1w";
@@ -116,7 +148,7 @@ mod tests {
                 assert!(aud.contains("account"));
                 assert!(aud.contains("lakekeeper"));
             }
-            _ => panic!("Unexpected result: {result:?}"),
+            IntrospectionResult::Unknown => panic!("Unexpected result: {result:?}"),
         }
     }
 
