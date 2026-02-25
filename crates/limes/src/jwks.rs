@@ -656,7 +656,9 @@ mod test {
             .email(None)
             .subject(subject)
             .principal_type(Some(PrincipalType::Application))
-            .audiences(HashSet::from(["00000003-0000-0000-c000-000000000000".to_string()]))
+            .audiences(HashSet::from([
+                "00000003-0000-0000-c000-000000000000".to_string()
+            ]))
             .build();
 
         assert_eq!(payload, expected_payload);
@@ -780,7 +782,9 @@ mod test {
             .email(Some("jack@example.com".to_string()))
             .subject(subject)
             .principal_type(Some(PrincipalType::Human))
-            .audiences(HashSet::from(["00000003-0000-0000-c000-000000000000".to_string()]))
+            .audiences(HashSet::from([
+                "00000003-0000-0000-c000-000000000000".to_string()
+            ]))
             .build();
 
         assert_eq!(payload, expected_payload);

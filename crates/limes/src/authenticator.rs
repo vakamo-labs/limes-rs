@@ -130,6 +130,6 @@ impl Authentication {
 
     #[must_use]
     pub fn idp_id(&self) -> Option<&str> {
-        self.subject().idp_id().map(|x| x.as_str())
+        self.subject().idp_id().map(std::string::String::as_str)
     }
 }

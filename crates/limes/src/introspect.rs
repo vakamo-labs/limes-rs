@@ -148,7 +148,7 @@ mod tests {
                 assert!(aud.contains("account"));
                 assert!(aud.contains("lakekeeper"));
             }
-            _ => panic!("Unexpected result: {result:?}"),
+            IntrospectionResult::Unknown => panic!("Unexpected result: {result:?}"),
         }
     }
 
