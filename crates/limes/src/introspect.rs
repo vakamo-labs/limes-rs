@@ -85,7 +85,7 @@ impl Audience {
 /// Handles both single-string (`"aud": "app"`) and array (`"aud": ["app1", "app2"]`) forms.
 pub(crate) fn parse_aud(value: Option<&serde_json::Value>) -> HashSet<String> {
     value
-        .and_then(|v| serde_json::from_value::<Audience>(v.clone()).ok())
+        .and_then(|v| Audience::deserialize(v).ok())
         .map(Audience::into_set)
         .unwrap_or_default()
 }

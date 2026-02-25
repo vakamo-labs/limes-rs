@@ -1155,4 +1155,29 @@ mod test {
 
         assert_eq!(payload_with_roles, expected_with_roles);
     }
+
+    #[test]
+    fn test_payload_missing_aud_claim_yields_empty_audiences() {
+        // A token with no "aud" field at all.  parse_aud() receives None and must
+        // fall through its unwrap_or_default() branch, returning an empty HashSet
+        // without panicking.
+        let claims = serde_json::json!({
+            "sub": "some-subject",
+            "iss": "https://example.com/",
+            "iat": 1_730_048_619,
+            "exp": 1_730_052_519,
+            "name": "Test User"
+        });
+
+        let token_header = jsonwebtoken::Header::new(Algorithm::RS256);
+        let token_data = jsonwebtoken::TokenData {
+            header: token_header.clone(),
+            claims: claims.clone(),
+        };
+
+        let payload =
+            extract_authentication(Some("idp"), token_data, &["sub".to_string()], None).unwrap();
+
+        assert_eq!(payload.audiences(), &HashSet::new());
+    }
 }

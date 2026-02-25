@@ -244,6 +244,7 @@ fn validate_audience(expected: &[String], received: &[String]) -> Result<()> {
 #[cfg(test)]
 mod test {
     use super::*;
+    use std::collections::HashSet;
 
     #[test]
     fn test_parse_review_status() {
@@ -307,6 +308,10 @@ mod test {
         assert_eq!(
             payload.subject().idp_id(),
             Some("my-k8s-cluster".to_string()).as_ref()
+        );
+        assert_eq!(
+            payload.audiences(),
+            &HashSet::from(["https://kubernetes.default.svc".to_string()])
         );
     }
 }
