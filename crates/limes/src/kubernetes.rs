@@ -103,25 +103,24 @@ impl KubernetesAuthenticator {
 }
 
 impl Authenticator for KubernetesAuthenticator {
-    async fn authenticate(&self, token: &str) -> Result<Authentication> {
+    async fn authenticate(
+        &self,
+        token: &str,
+        introspection: &IntrospectionResult,
+    ) -> Result<Authentication> {
         // If an issuer is set, the token must be JWT and the issuer must match
         if !self.issuers.is_empty() {
-            let introspection_result = crate::introspect::introspect(token);
-            match introspection_result {
+            match introspection {
                 IntrospectionResult::Unknown => {
                     return Err(Error::unauthenticated(
                         "Expected JWT token for Kubernetes Authenticator as issuer is set",
                     ));
                 }
-                IntrospectionResult::JWTBearer {
-                    iss,
-                    aud: _aud,
-                    header: _,
-                } => {
+                IntrospectionResult::JWTBearer { iss, .. } => {
                     if !self.issuers.iter().any(|i| iss.contains(i)) {
                         return Err(Error::IssuerMismatch {
                             expected: self.issuers.clone(),
-                            actual: iss.into_iter().collect(),
+                            actual: iss.iter().cloned().collect(),
                         });
                     }
                 }

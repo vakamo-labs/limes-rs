@@ -12,9 +12,19 @@ where
     /// Authenticate a token. This must validate the tokens signature and claims.
     /// For opaque tokens, handlers may connect to the `IdP` to validate the token.
     ///
+    /// The `introspection` is the result of [`introspect`](`crate::introspect::introspect`)
+    /// for `token`. It is computed once before routing (e.g. in
+    /// [`AuthenticatorChain`](`crate::AuthenticatorChain`) and the axum middleware) and passed
+    /// in so implementations can reuse the already-decoded header and claims instead of
+    /// decoding the token a second time.
+    ///
     /// # Errors
     /// - Token is not valid.
-    fn authenticate(&self, token: &str) -> impl Future<Output = Result<Authentication>> + Send;
+    fn authenticate(
+        &self,
+        token: &str,
+        introspection: &IntrospectionResult,
+    ) -> impl Future<Output = Result<Authentication>> + Send;
 
     /// Check if the authenticator can handle the token.
     /// This is used in the [`AuthenticatorChain`](`crate::AuthenticatorChain`) to determine which authenticator to use.
