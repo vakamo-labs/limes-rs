@@ -49,7 +49,8 @@ const AUD_CLAIM: &str = "aud";
 /// - `subject`: `sub` unless `subject_claim` is set, then it will be the value of the claim.
 /// - `claims`: all claims
 /// - `email`: `email` or `upn` if it contains an `@` or `preferred_username` if it contains an `@`
-/// - `principal_type`: Is always `Application` currently.
+/// - `principal_type`: inferred from the claims - `idtyp`, then the presence of a human-name
+///   claim (`Human`), an `app_displayname`/`client_id` claim (`Application`); `None` if undetermined.
 ///
 pub struct JWKSWebAuthenticator {
     idp_id: Option<String>,
@@ -360,12 +361,14 @@ fn authenticate_jwt(
         reason: format!("Failed to decode JWT token. {e}"),
     })?;
 
-    if let Some(scope) = scope {
-        let token_scopes =
-            parse_scope(token_data.claims.get(SCOPE_CLAIM).and_then(value_as_string));
-        if !token_scopes.contains(&scope.to_string()) {
+    if let Some(required_scope) = scope {
+        let scope_claim = token_data
+            .claims
+            .get(SCOPE_CLAIM)
+            .and_then(serde_json::Value::as_str);
+        if !scope_claim_contains(scope_claim, required_scope) {
             return Err(Error::unauthenticated(format!(
-                "Token does not contain required scope `{scope}`."
+                "Token does not contain required scope `{required_scope}`."
             )));
         }
     }
@@ -462,14 +465,12 @@ fn get_roles(claims: &serde_json::Value, role_claims: Option<&[String]>) -> Opti
     }
 
     for claim_path in role_claim_paths {
-        // Split by dots to support nested paths like "resource_access.account.roles"
-        let path_parts: Vec<&str> = claim_path.split('.').collect();
-
-        // Navigate through nested claims
+        // Navigate through nested claims, splitting on '.' to support paths like
+        // "resource_access.account.roles".
         let mut current = claims;
         let mut found = true;
 
-        for part in &path_parts {
+        for part in claim_path.split('.') {
             if let Some(next) = current.get(part) {
                 current = next;
             } else {
@@ -545,17 +546,6 @@ fn parse_human_name(claims: &serde_json::Value) -> Option<String> {
         })
 }
 
-fn parse_scope(scope_in_claims: Option<String>) -> Vec<String> {
-    scope_in_claims
-        .map(|scope| {
-            scope
-                .split(' ')
-                .map(std::string::ToString::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 #[derive(serde::Deserialize, Clone, Debug)]
 struct WellKnownConfig {
     pub jwks_uri: url::Url,
@@ -583,6 +573,12 @@ fn value_as_string(value: &serde_json::Value) -> Option<String> {
     value.as_str().map(std::string::ToString::to_string)
 }
 
+/// Returns `true` if the space-delimited `scope` claim contains `required`.
+/// Matches without allocating an intermediate collection.
+fn scope_claim_contains(scope_claim: Option<&str>, required: &str) -> bool {
+    scope_claim.is_some_and(|scopes| scopes.split_whitespace().any(|s| s == required))
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -590,24 +586,25 @@ mod test {
     use std::collections::HashSet;
 
     #[test]
-    fn test_parse_scope_multi() {
-        let scope = Some("openid profile email".to_string());
-        let parsed = parse_scope(scope);
-        assert_eq!(parsed, vec!["openid", "profile", "email"]);
+    fn test_scope_claim_contains_multi() {
+        assert!(scope_claim_contains(
+            Some("openid profile email"),
+            "profile"
+        ));
+        assert!(!scope_claim_contains(Some("openid profile email"), "admin"));
     }
 
     #[test]
-    fn test_parse_scope_empty() {
-        let scope = None;
-        let parsed = parse_scope(scope);
-        assert_eq!(parsed, Vec::<String>::new());
+    fn test_scope_claim_contains_single() {
+        assert!(scope_claim_contains(Some("openid"), "openid"));
+        // Must match a whole scope, not a prefix.
+        assert!(!scope_claim_contains(Some("openid"), "open"));
     }
 
     #[test]
-    fn test_parse_scope_single() {
-        let scope = Some("openid".to_string());
-        let parsed = parse_scope(scope);
-        assert_eq!(parsed, vec!["openid"]);
+    fn test_scope_claim_contains_absent() {
+        assert!(!scope_claim_contains(None, "openid"));
+        assert!(!scope_claim_contains(Some(""), "openid"));
     }
 
     #[test]
