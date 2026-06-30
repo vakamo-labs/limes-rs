@@ -5,6 +5,14 @@ use std::collections::HashSet;
 use std::fmt::Debug;
 use typed_builder::TypedBuilder;
 
+const ISSUER_CLAIM: &str = "iss";
+const EXPIRES_CLAIM: &str = "exp";
+const ISSUED_AT_CLAIM: &str = "iat";
+const NOT_BEFORE_CLAIM: &str = "nbf";
+/// The space-delimited OAuth `scope` claim. Shared with the JWKS authenticator so the key
+/// is defined in exactly one place.
+pub(crate) const SCOPE_CLAIM: &str = "scope";
+
 pub trait Authenticator
 where
     Self: Send + Sync + Clone,
@@ -145,5 +153,108 @@ impl Authentication {
     /// [`Subject::idp_id`] to `Option<&str>`.
     pub fn idp_id(&self) -> Option<&str> {
         self.subject().idp_id().map(std::string::String::as_str)
+    }
+
+    #[must_use]
+    /// Get the full set of claims as a JSON value.
+    ///
+    /// For JWTs this is the decoded payload; for the Kubernetes authenticator it is the
+    /// `user.extra` map returned by the `TokenReview` API. Prefer the typed accessors where one
+    /// exists; use [`claims`](Self::claims) to read a single claim by key.
+    pub fn all_claims(&self) -> &serde_json::Value {
+        &self.claims
+    }
+
+    #[must_use]
+    /// Get the issuer (`iss`) of the token, if present in the claims.
+    pub fn issuer(&self) -> Option<&str> {
+        self.claims
+            .get(ISSUER_CLAIM)
+            .and_then(serde_json::Value::as_str)
+    }
+
+    /// Get the scopes of the token, parsed from the space-delimited `scope` claim.
+    ///
+    /// Returns an empty iterator if the `scope` claim is absent. Derived on demand from the
+    /// claims so unused scopes cost nothing on the authentication path.
+    pub fn scopes(&self) -> impl Iterator<Item = &str> {
+        self.claims
+            .get(SCOPE_CLAIM)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .split_whitespace()
+    }
+
+    #[must_use]
+    /// Get the expiry (`exp`) as seconds since the Unix epoch, if present in the claims.
+    pub fn expires_at(&self) -> Option<i64> {
+        self.claims
+            .get(EXPIRES_CLAIM)
+            .and_then(serde_json::Value::as_i64)
+    }
+
+    #[must_use]
+    /// Get the issued-at time (`iat`) as seconds since the Unix epoch, if present in the claims.
+    pub fn issued_at(&self) -> Option<i64> {
+        self.claims
+            .get(ISSUED_AT_CLAIM)
+            .and_then(serde_json::Value::as_i64)
+    }
+
+    #[must_use]
+    /// Get the not-before time (`nbf`) as seconds since the Unix epoch, if present in the claims.
+    pub fn not_before(&self) -> Option<i64> {
+        self.claims
+            .get(NOT_BEFORE_CLAIM)
+            .and_then(serde_json::Value::as_i64)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::Subject;
+
+    fn auth_with_claims(claims: serde_json::Value) -> Authentication {
+        Authentication::builder()
+            .token_header(None)
+            .claims(claims)
+            .name(None)
+            .email(None)
+            .subject(Subject::new(None, "sub".to_string()))
+            .principal_type(None)
+            .build()
+    }
+
+    #[test]
+    fn test_metadata_accessors_present() {
+        let auth = auth_with_claims(serde_json::json!({
+            "iss": "https://issuer.example.com",
+            "exp": 1_730_052_519,
+            "iat": 1_730_048_619,
+            "nbf": 1_730_048_619,
+            "scope": "openid profile email",
+        }));
+
+        assert_eq!(auth.issuer(), Some("https://issuer.example.com"));
+        assert_eq!(auth.expires_at(), Some(1_730_052_519));
+        assert_eq!(auth.issued_at(), Some(1_730_048_619));
+        assert_eq!(auth.not_before(), Some(1_730_048_619));
+        assert_eq!(
+            auth.scopes().collect::<Vec<_>>(),
+            ["openid", "profile", "email"]
+        );
+        assert!(auth.all_claims().get("iss").is_some());
+    }
+
+    #[test]
+    fn test_metadata_accessors_absent() {
+        let auth = auth_with_claims(serde_json::json!({ "sub": "x" }));
+
+        assert_eq!(auth.issuer(), None);
+        assert_eq!(auth.expires_at(), None);
+        assert_eq!(auth.issued_at(), None);
+        assert_eq!(auth.not_before(), None);
+        assert_eq!(auth.scopes().count(), 0);
     }
 }
