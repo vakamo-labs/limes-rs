@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/vakamo-labs/limes-rs/compare/v0.3.3...v0.4.0) - 2026-06-30
+
+### Added
+
+- expose issuer, scopes, token times, and full claims on Authentication ([#69](https://github.com/vakamo-labs/limes-rs/pull/69))
+- [**breaking**] introspect once per request, bump deps ([#58](https://github.com/vakamo-labs/limes-rs/pull/58)) ([#64](https://github.com/vakamo-labs/limes-rs/pull/64))
+
+### Fixed
+
+- harden Kubernetes token validation and trim hot-path allocations ([#68](https://github.com/vakamo-labs/limes-rs/pull/68))
+
+### Other
+
+- remove unused once_cell dependency ([#66](https://github.com/vakamo-labs/limes-rs/pull/66))
+
 ## [0.3.3](https://github.com/vakamo-labs/limes-rs/compare/v0.3.2...v0.3.3) - 2026-06-28
 
 ### Added
