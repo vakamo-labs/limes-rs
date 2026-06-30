@@ -1,5 +1,6 @@
 //! Validate JWT tokens locally using JWKS keys fetched from a remote server.
 
+use crate::authenticator::SCOPE_CLAIM;
 use crate::introspect::IntrospectionResult;
 use crate::{
     Authentication, Authenticator, PrincipalType, Subject,
@@ -12,7 +13,6 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-const SCOPE_CLAIM: &str = "scope";
 const SUBJECT_CLAIM: &str = "sub";
 const IDTYP_CLAIM: &str = "idtyp";
 const APP_DISPLAYNAME_CLAIM: &str = "app_displayname";
