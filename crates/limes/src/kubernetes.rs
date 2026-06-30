@@ -177,16 +177,24 @@ fn parse_review_status(
     let token_review: TokenReviewStatus = token_review
         .ok_or_else(|| Error::unauthenticated("Kubernetes TokenReview returned no status"))?;
 
-    // Validate Audience
-    let actual_audiences = token_review.audiences.unwrap_or_default();
-    validate_audience(audiences, &actual_audiences)?;
-
     // Raise k8s error
     if let Some(error) = token_review.error {
         return Err(Error::unauthenticated(format!(
             "Kubernetes TokenReview failed: {error}"
         )));
     }
+
+    // The token is only valid if Kubernetes explicitly marked it as authenticated.
+    // Don't rely on the presence of `user` alone to infer this.
+    if token_review.authenticated != Some(true) {
+        return Err(Error::unauthenticated(
+            "Kubernetes TokenReview did not authenticate the token",
+        ));
+    }
+
+    // Validate Audience
+    let actual_audiences = token_review.audiences.unwrap_or_default();
+    validate_audience(audiences, &actual_audiences)?;
 
     // Parse claims
     let user_info: UserInfo = token_review
@@ -312,5 +320,19 @@ mod test {
             payload.audiences(),
             &HashSet::from(["https://kubernetes.default.svc".to_string()])
         );
+    }
+
+    #[test]
+    fn test_parse_review_status_rejects_unauthenticated() {
+        // `authenticated: false` must be rejected even when user info is present.
+        let status = serde_json::json!({
+            "authenticated": false,
+            "user": {
+                "uid": "0e79c2ec-32eb-4a46-ab9b-f075fbbfbd43",
+                "username": "system:serviceaccount:my-namespace:my-serviceaccount"
+            }
+        });
+        let token_review_status: TokenReviewStatus = serde_json::from_value(status).unwrap();
+        parse_review_status(Some(token_review_status), &[], Some("kubernetes")).unwrap_err();
     }
 }
