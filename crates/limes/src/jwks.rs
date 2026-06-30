@@ -246,12 +246,23 @@ impl JWKSWebAuthenticator {
 }
 
 impl Authenticator for JWKSWebAuthenticator {
-    async fn authenticate(&self, token: &str) -> Result<Authentication> {
-        let header = decode_jwt_header(token)?;
-        let key_id = require_jwt_key_id(&header)?;
+    async fn authenticate(
+        &self,
+        token: &str,
+        introspection: &IntrospectionResult,
+    ) -> Result<Authentication> {
+        // Reuse the header decoded during introspection instead of decoding the token again.
+        let IntrospectionResult::JWTBearer { header, .. } = introspection else {
+            return Err(Error::JWTDecodeError {
+                reason: "Token is not a JWT bearer token.".to_string(),
+            });
+        };
+        let key_id = header.kid.as_deref().ok_or_else(|| Error::JWTDecodeError {
+            reason: "Token does not contain a key id".to_string(),
+        })?;
         let key = self
             .client
-            .get_opt(&key_id)
+            .get_opt(key_id)
             .await
             .map_err(|e| Error::RefreshOpenIDWellKnownConfigError {
                 url: self.config_url.to_string(),
@@ -262,7 +273,7 @@ impl Authenticator for JWKSWebAuthenticator {
             })?;
         let token_data = authenticate_jwt(
             token,
-            &header,
+            header,
             &key,
             &self.audiences,
             &self.issuers,
@@ -298,18 +309,6 @@ impl Authenticator for JWKSWebAuthenticator {
             IntrospectionResult::Unknown => false,
         }
     }
-}
-
-fn decode_jwt_header(token: &str) -> Result<Header> {
-    jsonwebtoken::decode_header(token).map_err(|e| Error::JWTDecodeError {
-        reason: format!("Failed to decode JWT header: {e}").to_string(),
-    })
-}
-
-fn require_jwt_key_id(header: &Header) -> Result<String> {
-    header.kid.clone().ok_or_else(|| Error::JWTDecodeError {
-        reason: "Token does not contain a key id".to_string(),
-    })
 }
 
 fn authenticate_jwt(
@@ -381,14 +380,15 @@ fn extract_authentication(
     role_claims: Option<&[String]>,
 ) -> Result<Authentication> {
     let subject_in_idp = get_subject(&token_data, subject_claim)?;
+    let header = token_data.header;
     let claims = token_data.claims;
 
     let subject = Subject::new(idp_id.map(ToString::to_string), subject_in_idp);
 
-    let name = claims.get(NAME_CLAIM).and_then(value_as_string);
+    // `parse_human_name` already returns the `name` claim when present, so a separate
+    // `name` lookup would be redundant.
     let human_name = parse_human_name(&claims);
     let app_name = claims.get(APP_DISPLAYNAME_CLAIM).and_then(value_as_string);
-    let preferred_username = claims.get("preferred_username").and_then(value_as_string);
 
     let principal_type = get_idp_type(&claims)
         // If idp type is not set, try to infer it from the claims
@@ -397,19 +397,25 @@ fn extract_authentication(
         // In Keycloak the client_id is the requesting application
         .or(claims.get("client_id").map(|_t| PrincipalType::Application));
 
-    let roles = get_roles(&claims, role_claims);
+    // Fall back lazily so we only allocate the username string when nothing better matched.
+    let name = human_name
+        .or(app_name)
+        .or_else(|| claims.get("preferred_username").and_then(value_as_string));
 
+    let roles = get_roles(&claims, role_claims);
     let audiences = crate::introspect::parse_aud(claims.get(AUD_CLAIM));
+    let email = get_email(&claims);
 
     Ok(Authentication::builder()
-        .token_header(Some(token_data.header))
-        .claims(claims.clone())
-        .name(name.or(human_name).or(app_name).or(preferred_username))
-        .email(get_email(&claims))
+        .token_header(Some(header))
+        .name(name)
+        .email(email)
         .subject(subject)
         .principal_type(principal_type)
         .roles(roles)
         .audiences(audiences)
+        // Move the claims in last; everything above only borrows them, so no clone is needed.
+        .claims(claims)
         .build())
 }
 
@@ -529,7 +535,7 @@ fn parse_human_name(claims: &serde_json::Value) -> Option<String> {
         .and_then(value_as_string);
 
     claims
-        .get("name")
+        .get(NAME_CLAIM)
         .and_then(value_as_string)
         .or_else(|| match (first_name, last_name) {
             (Some(first), Some(last)) => Some(format!("{first} {last}")),

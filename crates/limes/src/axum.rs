@@ -27,7 +27,8 @@ pub async fn authentication_middleware<T: Authenticator>(
     };
 
     let token = authorization.token();
-    let auth_result = verifiers.authenticate(token).await;
+    let introspection = crate::introspect::introspect(token);
+    let auth_result = verifiers.authenticate(token, &introspection).await;
 
     match auth_result {
         Ok(auth) => {

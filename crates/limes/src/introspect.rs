@@ -52,8 +52,10 @@ pub fn introspect(token: &str) -> IntrospectionResult {
 
 #[derive(Deserialize)]
 pub(crate) struct JWTBearer {
-    #[allow(unused)]
-    sub: String,
+    // Only `iss` and `aud` are needed to classify and route a token. `sub` is intentionally
+    // not required here so introspection does not reject otherwise-valid tokens (e.g. those
+    // relying on a `subject_claim` override such as `oid`); the subject is resolved later
+    // during full authentication.
     iss: Issuer,
     #[serde(default)]
     aud: Audience,
@@ -164,6 +166,30 @@ mod tests {
             );
         } else {
             panic!("Unexpected result: {introspection_result:?}");
+        }
+    }
+
+    #[test]
+    fn test_introspect_without_sub_claim() {
+        // A token carrying `iss`/`aud` but no `sub` must still classify as a JWT bearer so
+        // that authenticators relying on a `subject_claim` override (e.g. `oid`) keep working.
+        let claims = serde_json::json!({
+            "iss": "https://example.com",
+            "aud": "my-app",
+        });
+        let token = jsonwebtoken::encode(
+            &Header::new(jsonwebtoken::Algorithm::HS256),
+            &claims,
+            &jsonwebtoken::EncodingKey::from_secret(b"secret"),
+        )
+        .unwrap();
+
+        match introspect(&token) {
+            IntrospectionResult::JWTBearer { iss, aud, .. } => {
+                assert!(iss.contains("https://example.com"));
+                assert!(aud.contains("my-app"));
+            }
+            IntrospectionResult::Unknown => panic!("expected JWTBearer for sub-less token"),
         }
     }
 }
