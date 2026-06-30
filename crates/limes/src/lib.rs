@@ -138,6 +138,9 @@
 //! * `all`: Activate all features
 //! * `default`: Includes `rustls-tls` and `jwks`.
 //! * `kubernetes`: Provides the `KubernetesAuthenticator` implementation which validates tokens using Kubernetes `TokenReview`.
+//!   When enabling this feature you must also select a Kubernetes API version by adding a direct
+//!   dependency on `k8s-openapi` with a version feature, e.g. `k8s-openapi = { version = "0.28", features = ["v1_32"] }`.
+//!   Limes intentionally does not pin a version so the choice is left to your binary crate.
 //! * `rustls-tls`: Enable `rustls` for all dependant crates.
 //! * `jwks`: Provides the `JWKSWebAuthenticator`
 //! * `axum`: Provides axum middleware that performs the Authentication and provides the tokens Payload as extension.

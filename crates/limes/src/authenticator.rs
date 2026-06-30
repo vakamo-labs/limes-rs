@@ -12,11 +12,12 @@ where
     /// Authenticate a token. This must validate the tokens signature and claims.
     /// For opaque tokens, handlers may connect to the `IdP` to validate the token.
     ///
-    /// The `introspection` is the result of [`introspect`](`crate::introspect::introspect`)
-    /// for `token`. It is computed once before routing (e.g. in
-    /// [`AuthenticatorChain`](`crate::AuthenticatorChain`) and the axum middleware) and passed
-    /// in so implementations can reuse the already-decoded header and claims instead of
-    /// decoding the token a second time.
+    /// `introspection` must be the result of [`introspect`](`crate::introspect::introspect`)
+    /// for `token`. The caller computes it once and passes it in (the axum middleware does
+    /// this for you). [`AuthenticatorChain`](`crate::AuthenticatorChain`) does not introspect;
+    /// it forwards the value it was given to the selected authenticator. This lets
+    /// implementations reuse the already-decoded header and claims instead of decoding the
+    /// token a second time.
     ///
     /// # Errors
     /// - Token is not valid.
