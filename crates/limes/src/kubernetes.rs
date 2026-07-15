@@ -451,8 +451,7 @@ mod test {
             ),
         ] {
             let status = serde_json::json!({ "authenticated": true, "user": user });
-            let token_review_status: TokenReviewStatus =
-                serde_json::from_value(status).unwrap();
+            let token_review_status: TokenReviewStatus = serde_json::from_value(status).unwrap();
             parse_review_status(Some(token_review_status), &[], Some("kubernetes"), source)
                 .unwrap_err();
         }

@@ -12,6 +12,12 @@ description = """
 Limes is a multi-tenant capable Authentication middleware for OAuth2.0 and Open ID Connect with support for axum.
 """
 
+[package.metadata.docs.rs]
+# document all features
+all-features = true
+# enable unstable features in the documentation
+rustdoc-args = ["--cfg", "docsrs"]
+
 [features]
 all = ["kubernetes", "rustls-tls", "jwks", "axum", "valuable"]
 default = ["rustls-tls", "jwks", "aws-lc-rs"]
@@ -57,9 +63,3 @@ k8s-openapi = { version = "0.28", features = ["v1_32"] }
 pretty_assertions = "1.4"
 tokio = { version = "1.43", features = ["rt-multi-thread"] }
 tracing-test = "0.2.5"
-
-[package.metadata.docs.rs]
-# document all features
-all-features = true
-# enable unstable features in the documentation
-rustdoc-args = ["--cfg", "docsrs"]
