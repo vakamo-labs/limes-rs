@@ -238,14 +238,18 @@ fn parse_review_status(
     let subject_in_idp = match subject_source {
         KubernetesSubjectSource::Uid => user_info
             .uid
-            .clone()
-            .filter(|s| !s.trim().is_empty())
-            .ok_or_else(|| Error::unauthenticated("No UID in kubernetes token review"))?,
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| Error::unauthenticated("No UID in kubernetes token review"))?
+            .to_string(),
         KubernetesSubjectSource::Username => user_info
             .username
-            .clone()
-            .filter(|s| !s.trim().is_empty())
-            .ok_or_else(|| Error::unauthenticated("No username in kubernetes token review"))?,
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| Error::unauthenticated("No username in kubernetes token review"))?
+            .to_string(),
     };
 
     let subject = Subject::new(idp_id.map(ToString::to_string), subject_in_idp);
@@ -454,6 +458,30 @@ mod test {
             let token_review_status: TokenReviewStatus = serde_json::from_value(status).unwrap();
             parse_review_status(Some(token_review_status), &[], Some("kubernetes"), source)
                 .unwrap_err();
+        }
+    }
+
+    #[test]
+    fn test_parse_review_status_trims_subject() {
+        // Padded values are stored trimmed (e.g. " abc " -> "abc").
+        for (source, expected, user) in [
+            (
+                KubernetesSubjectSource::Uid,
+                "abc",
+                serde_json::json!({ "uid": "  abc  ", "username": "system:serviceaccount:ns:sa" }),
+            ),
+            (
+                KubernetesSubjectSource::Username,
+                "system:serviceaccount:ns:sa",
+                serde_json::json!({ "uid": "0e79c2ec", "username": "  system:serviceaccount:ns:sa  " }),
+            ),
+        ] {
+            let status = serde_json::json!({ "authenticated": true, "user": user });
+            let token_review_status: TokenReviewStatus = serde_json::from_value(status).unwrap();
+            let payload =
+                parse_review_status(Some(token_review_status), &[], Some("kubernetes"), source)
+                    .unwrap();
+            assert_eq!(payload.subject().subject_in_idp(), expected);
         }
     }
 }

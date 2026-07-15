@@ -15,8 +15,6 @@ Limes is a multi-tenant capable Authentication middleware for OAuth2.0 and Open 
 [package.metadata.docs.rs]
 # document all features
 all-features = true
-# enable unstable features in the documentation
-rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 all = ["kubernetes", "rustls-tls", "jwks", "axum", "valuable"]
