@@ -33,7 +33,9 @@ use kube::api::PostParams;
 /// **Field Mappings**:
 /// - `name`: `user.username`
 /// - `email`: `user.extra.email`
-/// - `subject`: `user.uid`
+/// - `subject`: `user.uid` by default, or `user.username` when the subject
+///   source is set to [`KubernetesSubjectSource::Username`] via
+///   [`set_subject_source`](`KubernetesAuthenticator::set_subject_source`).
 /// - `claims`: `user.extra`
 /// - `principal_type`: Is always `Application` currently.
 ///
@@ -42,6 +44,25 @@ pub struct KubernetesAuthenticator {
     client: kube::client::Client,
     audiences: Vec<String>,
     issuers: Vec<String>,
+    subject_source: KubernetesSubjectSource,
+}
+
+/// Which field of the Kubernetes `TokenReview` response is used as the
+/// authenticated user's subject (the provider-local part of the identity).
+///
+/// The default is [`KubernetesSubjectSource::Uid`], which preserves historical
+/// behaviour.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum KubernetesSubjectSource {
+    /// Use `user.uid` — the service account's Kubernetes UID. Unique and
+    /// immutable within a cluster, but assigned by Kubernetes, so the same
+    /// service account has a different UID in each cluster.
+    #[default]
+    Uid,
+    /// Use `user.username` — for service account tokens this is
+    /// `system:serviceaccount:<namespace>:<name>`. Stable across clusters,
+    /// which makes it suitable for pre-provisioning identities.
+    Username,
 }
 
 impl KubernetesAuthenticator {
@@ -64,6 +85,7 @@ impl KubernetesAuthenticator {
             client: Self::get_client().await?,
             audiences,
             issuers: vec![],
+            subject_source: KubernetesSubjectSource::default(),
         })
     }
 
@@ -86,6 +108,7 @@ impl KubernetesAuthenticator {
             client,
             audiences,
             issuers: vec![],
+            subject_source: KubernetesSubjectSource::default(),
         })
     }
 
@@ -93,6 +116,12 @@ impl KubernetesAuthenticator {
     /// If not set, the authenticator will accept any issuer.
     pub fn set_issuers(&mut self, issuers: Vec<String>) {
         self.issuers = issuers;
+    }
+
+    /// Set which `TokenReview` field is used as the subject.
+    /// Defaults to [`KubernetesSubjectSource::Uid`].
+    pub fn set_subject_source(&mut self, subject_source: KubernetesSubjectSource) {
+        self.subject_source = subject_source;
     }
 
     async fn get_client() -> Result<kube::client::Client> {
@@ -143,7 +172,12 @@ impl Authenticator for KubernetesAuthenticator {
             .await
             .map_err(Error::KubernetesTokenReviewError)?;
 
-        parse_review_status(review.status, &self.audiences, self.idp_id.as_deref())
+        parse_review_status(
+            review.status,
+            &self.audiences,
+            self.idp_id.as_deref(),
+            self.subject_source,
+        )
     }
 
     fn can_handle_token(&self, token: &str, introspection_result: &IntrospectionResult) -> bool {
@@ -173,6 +207,7 @@ fn parse_review_status(
     token_review: Option<TokenReviewStatus>,
     audiences: &[String],
     idp_id: Option<&str>,
+    subject_source: KubernetesSubjectSource,
 ) -> Result<Authentication> {
     let token_review: TokenReviewStatus = token_review
         .ok_or_else(|| Error::unauthenticated("Kubernetes TokenReview returned no status"))?;
@@ -200,11 +235,20 @@ fn parse_review_status(
     let user_info: UserInfo = token_review
         .user
         .ok_or_else(|| Error::unauthenticated("No user in kubernetes token review"))?;
-    let uid = user_info
-        .uid
-        .ok_or_else(|| Error::unauthenticated("No UID in kubernetes token review"))?;
+    let subject_in_idp = match subject_source {
+        KubernetesSubjectSource::Uid => user_info
+            .uid
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| Error::unauthenticated("No UID in kubernetes token review"))?,
+        KubernetesSubjectSource::Username => user_info
+            .username
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| Error::unauthenticated("No username in kubernetes token review"))?,
+    };
 
-    let subject = Subject::new(idp_id.map(ToString::to_string), uid);
+    let subject = Subject::new(idp_id.map(ToString::to_string), subject_in_idp);
 
     let claims = serde_json::to_value(user_info.extra).unwrap_or_default();
     Ok(Authentication::builder()
@@ -229,6 +273,7 @@ impl std::fmt::Debug for KubernetesAuthenticator {
         r.field("audiences", &self.audiences)
             .field("client", &"kube::client::Client")
             .field("issuers", &self.issuers)
+            .field("subject_source", &self.subject_source)
             .finish()
     }
 }
@@ -293,6 +338,7 @@ mod test {
             Some(token_review_status.clone()),
             &["nonexistant-audience".to_string()],
             Some("kubernetes"),
+            KubernetesSubjectSource::Uid,
         )
         .unwrap_err();
 
@@ -301,6 +347,7 @@ mod test {
             Some(token_review_status),
             &["https://kubernetes.default.svc".to_string()],
             Some("my-k8s-cluster"),
+            KubernetesSubjectSource::Uid,
         )
         .unwrap();
 
@@ -333,6 +380,81 @@ mod test {
             }
         });
         let token_review_status: TokenReviewStatus = serde_json::from_value(status).unwrap();
-        parse_review_status(Some(token_review_status), &[], Some("kubernetes")).unwrap_err();
+        parse_review_status(
+            Some(token_review_status),
+            &[],
+            Some("kubernetes"),
+            KubernetesSubjectSource::Uid,
+        )
+        .unwrap_err();
+    }
+
+    #[test]
+    fn test_parse_review_status_username_subject_source() {
+        let status = serde_json::json!({
+            "audiences": ["https://kubernetes.default.svc"],
+            "authenticated": true,
+            "user": {
+                "uid": "0e79c2ec-32eb-4a46-ab9b-f075fbbfbd43",
+                "username": "system:serviceaccount:my-namespace:my-serviceaccount"
+            }
+        });
+        let token_review_status: TokenReviewStatus = serde_json::from_value(status).unwrap();
+
+        let payload = parse_review_status(
+            Some(token_review_status),
+            &["https://kubernetes.default.svc".to_string()],
+            Some("kubernetes"),
+            KubernetesSubjectSource::Username,
+        )
+        .unwrap();
+
+        // Subject is the username; display name is unaffected.
+        assert_eq!(
+            payload.subject().subject_in_idp(),
+            "system:serviceaccount:my-namespace:my-serviceaccount"
+        );
+        assert_eq!(
+            payload.full_name(),
+            Some("system:serviceaccount:my-namespace:my-serviceaccount")
+        );
+    }
+
+    #[test]
+    fn test_parse_review_status_username_source_missing_username() {
+        let status = serde_json::json!({
+            "authenticated": true,
+            "user": { "uid": "0e79c2ec-32eb-4a46-ab9b-f075fbbfbd43" }
+        });
+        let token_review_status: TokenReviewStatus = serde_json::from_value(status).unwrap();
+        parse_review_status(
+            Some(token_review_status),
+            &[],
+            Some("kubernetes"),
+            KubernetesSubjectSource::Username,
+        )
+        .unwrap_err();
+    }
+
+    #[test]
+    fn test_parse_review_status_rejects_empty_subject() {
+        // A present-but-empty subject field must be rejected, not turned into
+        // an empty subject (`kubernetes~`).
+        for (source, user) in [
+            (
+                KubernetesSubjectSource::Uid,
+                serde_json::json!({ "uid": "   ", "username": "system:serviceaccount:ns:sa" }),
+            ),
+            (
+                KubernetesSubjectSource::Username,
+                serde_json::json!({ "uid": "0e79c2ec", "username": "" }),
+            ),
+        ] {
+            let status = serde_json::json!({ "authenticated": true, "user": user });
+            let token_review_status: TokenReviewStatus =
+                serde_json::from_value(status).unwrap();
+            parse_review_status(Some(token_review_status), &[], Some("kubernetes"), source)
+                .unwrap_err();
+        }
     }
 }
