@@ -24,7 +24,6 @@ rustls-tls = [
     "kube?/rustls-tls",
     "jwks_client_rs?/rustls",
     "reqwest/rustls",
-    "reqwest/rustls-native-certs",
 ]
 aws-lc-rs = ["kube?/aws-lc-rs"]
 ring = ["kube?/ring"]
