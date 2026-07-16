@@ -45,7 +45,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: sudo snap install --edge --classic just
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install Rust ${{ env.rust_clippy }}
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -60,7 +60,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: sudo snap install --edge --classic just
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install Rust ${{ env.rust_clippy }}
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -74,7 +74,7 @@ jobs:
     name: docs
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install Rust ${{ env.rust_stable }}
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -96,7 +96,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: sudo snap install --edge --classic just
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install Rust ${{ env.rust_stable }}
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -113,7 +113,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: sudo snap install --edge --classic just
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install Rust ${{ env.rust_min }}
         uses: dtolnay/rust-toolchain@stable
         with:
