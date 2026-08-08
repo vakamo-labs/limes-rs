@@ -45,7 +45,8 @@ const AUD_CLAIM: &str = "aud";
 ///
 ///
 /// **Payload Field Mappings**:
-/// - `name`: `name` or `given_name`/ `first_name` and `family_name`/ `last_name` or `app_displayname` or `preferred_username`
+/// - `name`: `name` or `given_name`/ `first_name` and `family_name`/ `last_name` or `app_displayname` or `preferred_username`;
+///   if none are present and a display-name template is configured, it is rendered from the claims (see [`JWKSWebAuthenticator::with_display_name_template`])
 /// - `subject`: `sub` unless `subject_claim` is set, then it will be the value of the claim.
 /// - `claims`: all claims
 /// - `email`: `email` or `upn` if it contains an `@` or `preferred_username` if it contains an `@`
@@ -61,6 +62,7 @@ pub struct JWKSWebAuthenticator {
     config_url: url::Url,
     subject_claim: Vec<String>,
     role_claims: Option<Vec<String>>,
+    display_name_template: Option<DisplayNameTemplate>,
 }
 
 impl JWKSWebAuthenticator {
@@ -89,6 +91,7 @@ impl JWKSWebAuthenticator {
             config_url,
             subject_claim: vec![SUBJECT_CLAIM.to_string()],
             role_claims: None,
+            display_name_template: None,
         })
     }
 
@@ -183,6 +186,28 @@ impl JWKSWebAuthenticator {
         } else {
             self.role_claims = Some(filtered);
         }
+        self
+    }
+
+    /// Set a template used to derive the display name when a token carries no
+    /// name claim (none of `name` / `given_name`+`family_name` / `app_displayname` /
+    /// `preferred_username`). Placeholders of the form `{claim.path}` are
+    /// substituted with the string value at that (dot-notation) claim path;
+    /// `{email}` and `{sub}` are the common cases. Write a literal brace by
+    /// doubling it (`{{`/`}}`), as in [`std::fmt`]. If any referenced claim is
+    /// absent or not a string the template does not apply and the name is left
+    /// unset (so the caller keeps its own fallback).
+    ///
+    /// Takes an already-parsed [`DisplayNameTemplate`] (build one with
+    /// [`DisplayNameTemplate::parse`] or `str::parse`), so this setter is
+    /// infallible: the template is valid by construction, and a malformed one is
+    /// rejected at parse time rather than silently never rendering.
+    ///
+    /// Typical use is a machine / service-account issuer, e.g.
+    /// `DisplayNameTemplate::parse("Service Account {email}")`.
+    #[must_use]
+    pub fn with_display_name_template(mut self, template: DisplayNameTemplate) -> Self {
+        self.display_name_template = Some(template);
         self
     }
 
@@ -286,6 +311,7 @@ impl Authenticator for JWKSWebAuthenticator {
             token_data,
             &self.subject_claim,
             self.role_claims.as_deref(),
+            self.display_name_template.as_ref(),
         )
     }
 
@@ -381,6 +407,7 @@ fn extract_authentication(
     token_data: jsonwebtoken::TokenData<serde_json::Value>,
     subject_claim: &[String],
     role_claims: Option<&[String]>,
+    display_name_template: Option<&DisplayNameTemplate>,
 ) -> Result<Authentication> {
     let subject_in_idp = get_subject(&token_data, subject_claim)?;
     let header = token_data.header;
@@ -403,7 +430,10 @@ fn extract_authentication(
     // Fall back lazily so we only allocate the username string when nothing better matched.
     let name = human_name
         .or(app_name)
-        .or_else(|| claims.get("preferred_username").and_then(value_as_string));
+        .or_else(|| claims.get("preferred_username").and_then(value_as_string))
+        // Last resort for tokens that carry no name claim at all (e.g. machine /
+        // service-account tokens): render the configured display-name template.
+        .or_else(|| display_name_template.and_then(|t| t.render(&claims)));
 
     let roles = get_roles(&claims, role_claims);
     let audiences = crate::introspect::parse_aud(claims.get(AUD_CLAIM));
@@ -465,23 +495,10 @@ fn get_roles(claims: &serde_json::Value, role_claims: Option<&[String]>) -> Opti
     }
 
     for claim_path in role_claim_paths {
-        // Navigate through nested claims, splitting on '.' to support paths like
-        // "resource_access.account.roles".
-        let mut current = claims;
-        let mut found = true;
-
-        for part in claim_path.split('.') {
-            if let Some(next) = current.get(part) {
-                current = next;
-            } else {
-                found = false;
-                break;
-            }
-        }
-
-        if !found {
+        // Navigate nested claims (dot-notation, e.g. "resource_access.account.roles").
+        let Some(current) = navigate(claims, claim_path) else {
             continue;
-        }
+        };
 
         // Handle array of strings
         if let Some(roles_array) = current.as_array() {
@@ -565,12 +582,185 @@ impl std::fmt::Debug for JWKSWebAuthenticator {
             .field("subject_claim", &self.subject_claim)
             .field("client", &"jwks_client_rs::JwksClient<WebSource>")
             .field("role_claims", &self.role_claims)
+            .field("display_name_template", &self.display_name_template)
             .finish()
     }
 }
 
 fn value_as_string(value: &serde_json::Value) -> Option<String> {
     value.as_str().map(std::string::ToString::to_string)
+}
+
+/// Navigate nested JSON claims using dot-notation (e.g. `resource_access.account.roles`).
+/// Returns the value at the path, or `None` if any segment is absent.
+fn navigate<'a>(claims: &'a serde_json::Value, dot_path: &str) -> Option<&'a serde_json::Value> {
+    let mut current = claims;
+    for part in dot_path.split('.') {
+        current = current.get(part)?;
+    }
+    Some(current)
+}
+
+/// A structurally invalid display-name template — one that can never render for
+/// any token, independent of its claims. (A well-formed template whose claim is
+/// merely absent from a given token is *not* an error; it simply doesn't apply
+/// to that token.) Returned by [`DisplayNameTemplate::parse`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum DisplayNameTemplateError {
+    /// A `{` with no matching `}` (write a literal brace as `{{`).
+    #[error("unmatched `{{` in display-name template (write a literal brace as `{{{{`)")]
+    UnmatchedOpenBrace,
+    /// A `}` with no matching `{` (write a literal brace as `}}`).
+    #[error("unmatched `}}` in display-name template (write a literal brace as `}}}}`)")]
+    UnmatchedCloseBrace,
+    /// An empty `{}` placeholder — a placeholder must name a claim.
+    #[error("empty `{{}}` placeholder in display-name template (name a claim, e.g. `{{email}}`)")]
+    EmptyPlaceholder,
+}
+
+/// One piece of a parsed display-name template.
+enum TemplateEvent<'a> {
+    /// Verbatim text, with any `{{`/`}}` already unescaped to a single brace.
+    Literal(&'a str),
+    /// A `{claim.path}` placeholder — the dot-notation path, without braces.
+    Claim(&'a str),
+}
+
+/// Walk `template`, invoking `sink` for each literal chunk and placeholder in
+/// order (`{{`/`}}` are emitted as single-brace literals). This is the single
+/// source of the template grammar; [`DisplayNameTemplate::parse`] drives it to
+/// build the validated segment list.
+fn parse_display_name_template(
+    template: &str,
+    mut sink: impl FnMut(TemplateEvent<'_>),
+) -> std::result::Result<(), DisplayNameTemplateError> {
+    let mut rest = template;
+    loop {
+        let Some(idx) = rest.find(['{', '}']) else {
+            sink(TemplateEvent::Literal(rest));
+            return Ok(());
+        };
+        sink(TemplateEvent::Literal(&rest[..idx]));
+        let brace = rest.as_bytes()[idx];
+        rest = &rest[idx + 1..];
+
+        if brace == b'}' {
+            // A `}` is only valid as the escape `}}`; a lone `}` is malformed.
+            let Some(stripped) = rest.strip_prefix('}') else {
+                return Err(DisplayNameTemplateError::UnmatchedCloseBrace);
+            };
+            sink(TemplateEvent::Literal("}"));
+            rest = stripped;
+            continue;
+        }
+
+        // `brace == b'{'`: either the escape `{{` or the start of a placeholder.
+        if let Some(stripped) = rest.strip_prefix('{') {
+            sink(TemplateEvent::Literal("{"));
+            rest = stripped;
+            continue;
+        }
+        let Some(close) = rest.find('}') else {
+            return Err(DisplayNameTemplateError::UnmatchedOpenBrace);
+        };
+        let path = &rest[..close];
+        if path.is_empty() {
+            return Err(DisplayNameTemplateError::EmptyPlaceholder);
+        }
+        sink(TemplateEvent::Claim(path));
+        rest = &rest[close + 1..];
+    }
+}
+
+/// A validated display-name template: a sequence of literal text and
+/// `{claim.path}` placeholders. Constructed via [`DisplayNameTemplate::parse`]
+/// (or [`str::parse`]), so holding one is proof its syntax is valid — which is
+/// why [`JWKSWebAuthenticator::with_display_name_template`] can accept it
+/// infallibly. Resolved against a token's claims during authentication.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DisplayNameTemplate {
+    source: String,
+    segments: Vec<Segment>,
+}
+
+/// One piece of a parsed [`DisplayNameTemplate`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Segment {
+    /// Verbatim text, with any `{{`/`}}` already unescaped to a single brace.
+    Literal(String),
+    /// A claim path (dot-notation) to resolve at render time.
+    Claim(String),
+}
+
+impl DisplayNameTemplate {
+    /// Parse and validate a display-name template.
+    ///
+    /// Placeholders are `{claim.path}` (dot-notation); write a literal brace by
+    /// doubling it (`{{`/`}}`), as in [`std::fmt`]. The *structure* is validated
+    /// here — braces must balance and every placeholder must name a claim — but
+    /// whether a referenced claim exists is token-dependent and is checked only at
+    /// render time.
+    ///
+    /// # Errors
+    /// Returns [`DisplayNameTemplateError`] for an unmatched `{`, a stray `}`, or
+    /// an empty `{}` placeholder.
+    pub fn parse(template: &str) -> std::result::Result<Self, DisplayNameTemplateError> {
+        let mut segments = Vec::new();
+        let mut literal = String::new();
+        parse_display_name_template(template, |event| match event {
+            TemplateEvent::Literal(text) => literal.push_str(text),
+            TemplateEvent::Claim(path) => {
+                if !literal.is_empty() {
+                    segments.push(Segment::Literal(std::mem::take(&mut literal)));
+                }
+                segments.push(Segment::Claim(path.to_string()));
+            }
+        })?;
+        if !literal.is_empty() {
+            segments.push(Segment::Literal(literal));
+        }
+        Ok(Self {
+            source: template.to_string(),
+            segments,
+        })
+    }
+
+    /// Render the template against `claims`. Returns `None` — so the caller keeps
+    /// its own default — when a referenced claim is missing or not a string
+    /// (logged at `debug`), or when the result is empty or all-whitespace.
+    /// Surrounding whitespace is trimmed.
+    fn render(&self, claims: &serde_json::Value) -> Option<String> {
+        let mut out = String::with_capacity(self.source.len());
+        for segment in &self.segments {
+            match segment {
+                Segment::Literal(text) => out.push_str(text),
+                Segment::Claim(path) => {
+                    let Some(value) = navigate(claims, path).and_then(value_as_string) else {
+                        tracing::debug!(
+                            "Display name template `{}` not applied: claim `{path}` is missing or not a string.",
+                            self.source
+                        );
+                        return None;
+                    };
+                    out.push_str(&value);
+                }
+            }
+        }
+        let trimmed = out.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    }
+}
+
+impl std::str::FromStr for DisplayNameTemplate {
+    type Err = DisplayNameTemplateError;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        Self::parse(s)
+    }
 }
 
 /// Returns `true` if the space-delimited `scope` claim contains `required`.
@@ -645,6 +835,7 @@ mod test {
             token_data,
             &["oid".to_string(), "sub".to_string()],
             None,
+            None,
         )
         .unwrap();
 
@@ -706,7 +897,8 @@ mod test {
         };
 
         let payload =
-            extract_authentication(Some("idp"), token_data, &["oid".to_string()], None).unwrap();
+            extract_authentication(Some("idp"), token_data, &["oid".to_string()], None, None)
+                .unwrap();
 
         let subject = Subject::new(Some("idp".to_string()), "user-oid".to_string());
 
@@ -771,7 +963,8 @@ mod test {
         };
 
         let payload =
-            extract_authentication(Some("idp"), token_data, &["oid".to_string()], None).unwrap();
+            extract_authentication(Some("idp"), token_data, &["oid".to_string()], None, None)
+                .unwrap();
 
         let subject = Subject::new(
             Some("idp".to_string()),
@@ -1004,9 +1197,14 @@ mod test {
             claims: claims.clone(),
         };
 
-        let payload =
-            extract_authentication(Some("idp"), token_data.clone(), &["sub".to_string()], None)
-                .unwrap();
+        let payload = extract_authentication(
+            Some("idp"),
+            token_data.clone(),
+            &["sub".to_string()],
+            None,
+            None,
+        )
+        .unwrap();
 
         let subject = Subject::new(
             Some("idp".to_string()),
@@ -1031,6 +1229,7 @@ mod test {
             token_data,
             &["sub".to_string()],
             Some(&["realm_access.roles".to_string()]),
+            None,
         )
         .unwrap();
 
@@ -1105,9 +1304,14 @@ mod test {
             claims: claims.clone(),
         };
 
-        let payload =
-            extract_authentication(Some("idp"), token_data.clone(), &["sub".to_string()], None)
-                .unwrap();
+        let payload = extract_authentication(
+            Some("idp"),
+            token_data.clone(),
+            &["sub".to_string()],
+            None,
+            None,
+        )
+        .unwrap();
 
         let subject = Subject::new(
             Some("idp".to_string()),
@@ -1135,6 +1339,7 @@ mod test {
             token_data,
             &["sub".to_string()],
             Some(&["resource_access.account.roles".to_string()]),
+            None,
         )
         .unwrap();
 
@@ -1179,8 +1384,187 @@ mod test {
         };
 
         let payload =
-            extract_authentication(Some("idp"), token_data, &["sub".to_string()], None).unwrap();
+            extract_authentication(Some("idp"), token_data, &["sub".to_string()], None, None)
+                .unwrap();
 
         assert_eq!(payload.audiences(), &HashSet::new());
+    }
+
+    fn parse_ok(template: &str) -> DisplayNameTemplate {
+        DisplayNameTemplate::parse(template).expect("template should be valid")
+    }
+
+    #[test]
+    fn test_display_name_template_parse_accepts_well_formed() {
+        assert!(DisplayNameTemplate::parse("Service Account {email}").is_ok());
+        assert!(DisplayNameTemplate::parse("{sub}").is_ok());
+        assert!(DisplayNameTemplate::parse("literal, no placeholders").is_ok());
+        assert!(DisplayNameTemplate::parse("{{escaped}} {sub}").is_ok());
+        // Claim existence is token-dependent and deliberately NOT checked at parse.
+        assert!(DisplayNameTemplate::parse("{a.b.c}").is_ok());
+    }
+
+    #[test]
+    fn test_display_name_template_parse_rejects_structural_errors() {
+        assert_eq!(
+            DisplayNameTemplate::parse("Team {Alpha"),
+            Err(DisplayNameTemplateError::UnmatchedOpenBrace)
+        );
+        assert_eq!(
+            DisplayNameTemplate::parse("Team Alpha}"),
+            Err(DisplayNameTemplateError::UnmatchedCloseBrace)
+        );
+        assert_eq!(
+            DisplayNameTemplate::parse("{}"),
+            Err(DisplayNameTemplateError::EmptyPlaceholder)
+        );
+    }
+
+    #[test]
+    fn test_display_name_template_from_str() {
+        let template: DisplayNameTemplate = "Service Account {email}".parse().unwrap();
+        let claims = serde_json::json!({ "email": "sa@example.com" });
+        assert_eq!(
+            template.render(&claims),
+            Some("Service Account sa@example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn test_render_substitutes_email() {
+        let claims = serde_json::json!({ "email": "sa@example.com", "sub": "abc" });
+        assert_eq!(
+            parse_ok("Service Account {email}").render(&claims),
+            Some("Service Account sa@example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn test_render_substitutes_sub() {
+        let claims = serde_json::json!({ "sub": "abc-123" });
+        assert_eq!(
+            parse_ok("{sub}").render(&claims),
+            Some("abc-123".to_string())
+        );
+    }
+
+    #[test]
+    fn test_render_navigates_nested_claim() {
+        let claims = serde_json::json!({ "a": { "b": { "c": "deep" } } });
+        assert_eq!(
+            parse_ok("name={a.b.c}").render(&claims),
+            Some("name=deep".to_string())
+        );
+    }
+
+    #[test]
+    fn test_render_escaped_braces() {
+        let claims = serde_json::json!({ "sub": "abc" });
+        // `{{`/`}}` are literal braces, matching `format!` semantics.
+        assert_eq!(parse_ok("{{}}").render(&claims), Some("{}".to_string()));
+        assert_eq!(
+            parse_ok("{{{sub}}}").render(&claims),
+            Some("{abc}".to_string())
+        );
+        assert_eq!(
+            parse_ok("Team {{Alpha}}").render(&claims),
+            Some("Team {Alpha}".to_string())
+        );
+    }
+
+    #[test]
+    fn test_render_literal_only() {
+        let claims = serde_json::json!({ "sub": "abc" });
+        assert_eq!(
+            parse_ok("Machine Account").render(&claims),
+            Some("Machine Account".to_string())
+        );
+    }
+
+    #[test]
+    fn test_render_missing_claim_yields_none() {
+        // `email` is absent, so the template does not apply and the caller falls
+        // back to its own default rather than rendering a half-filled string.
+        let claims = serde_json::json!({ "sub": "abc" });
+        assert_eq!(parse_ok("Service Account {email}").render(&claims), None);
+    }
+
+    #[test]
+    fn test_render_non_string_claim_yields_none() {
+        // A claim that exists but is not a string (e.g. an array) does not apply.
+        let claims = serde_json::json!({ "organizations": ["org-1"] });
+        assert_eq!(parse_ok("{organizations}").render(&claims), None);
+    }
+
+    #[test]
+    fn test_render_does_not_rescan_substituted_value() {
+        // A claim value that itself contains braces must never be re-interpreted
+        // as a placeholder — render walks pre-parsed segments, not the output.
+        let claims = serde_json::json!({ "org": "Team {X}" });
+        assert_eq!(
+            parse_ok("{org}").render(&claims),
+            Some("Team {X}".to_string())
+        );
+    }
+
+    #[test]
+    fn test_render_trims_surrounding_whitespace() {
+        let claims = serde_json::json!({ "sub": "abc" });
+        assert_eq!(
+            parse_ok("  {sub}  ").render(&claims),
+            Some("abc".to_string())
+        );
+    }
+
+    #[test]
+    fn test_display_name_template_applied_when_no_name_claim() {
+        // A bare machine token (no name/given_name/app_displayname/preferred_username)
+        // — as issued by e.g. STACKIT service accounts — falls back to the template.
+        let claims = serde_json::json!({
+            "sub": "d0f26f85-a4fd-4dba-9534-9f69ba2b17ac",
+            "email": "sa@sa.stackit.cloud",
+            "iss": "https://accounts.qa.stackit.cloud",
+        });
+        let token_data = jsonwebtoken::TokenData {
+            header: jsonwebtoken::Header::new(Algorithm::RS256),
+            claims,
+        };
+        let template = parse_ok("Service Account {email}");
+        let payload = extract_authentication(
+            Some("oidc"),
+            token_data,
+            &["sub".to_string()],
+            None,
+            Some(&template),
+        )
+        .unwrap();
+        assert_eq!(
+            payload.full_name(),
+            Some("Service Account sa@sa.stackit.cloud")
+        );
+    }
+
+    #[test]
+    fn test_display_name_template_ignored_when_name_claim_present() {
+        // A real human-name claim always wins; the template is a fallback only.
+        let claims = serde_json::json!({
+            "sub": "x",
+            "name": "Jane Doe",
+            "email": "jane@example.com",
+        });
+        let token_data = jsonwebtoken::TokenData {
+            header: jsonwebtoken::Header::new(Algorithm::RS256),
+            claims,
+        };
+        let template = parse_ok("Service Account {email}");
+        let payload = extract_authentication(
+            Some("oidc"),
+            token_data,
+            &["sub".to_string()],
+            None,
+            Some(&template),
+        )
+        .unwrap();
+        assert_eq!(payload.full_name(), Some("Jane Doe"));
     }
 }
