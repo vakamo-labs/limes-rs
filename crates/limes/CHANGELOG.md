@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.3](https://github.com/vakamo-labs/limes-rs/compare/v0.4.2...v0.4.3) - 2026-08-08
+
+### Added
+
+- *(jwks)* configurable display-name template for tokens without a name claim ([#76](https://github.com/vakamo-labs/limes-rs/pull/76))
+
+### Other
+
+- *(deps)* update jsonwebtoken requirement from 10.4 to 11.0 ([#75](https://github.com/vakamo-labs/limes-rs/pull/75))
+
 ## [0.4.2](https://github.com/vakamo-labs/limes-rs/compare/v0.4.1...v0.4.2) - 2026-07-16
 
 ### Fixed
