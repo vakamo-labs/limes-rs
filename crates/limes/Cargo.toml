@@ -34,7 +34,7 @@ valuable = ["dep:valuable"]
 [dependencies]
 axum = { version = "0.8", optional = true }
 axum-extra = { version = "0.12", optional = true, features = ["typed-header"] }
-jsonwebtoken = { version = "10.4", features = ["aws_lc_rs"] }
+jsonwebtoken = { version = "11.0", features = ["aws_lc_rs"] }
 jwks_client_rs = { version = "0.6", optional = true, default-features = false }
 # No version feature here: per k8s-openapi's guidance a library must let the final
 # binary crate choose the Kubernetes version. The version is selected in dev-dependencies
