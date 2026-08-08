@@ -664,7 +664,12 @@ fn parse_display_name_template(
             return Err(DisplayNameTemplateError::UnmatchedOpenBrace);
         };
         let path = &rest[..close];
-        if path.is_empty() {
+        // A `{` before the closing `}` means an earlier `{` was never closed.
+        if path.contains('{') {
+            return Err(DisplayNameTemplateError::UnmatchedOpenBrace);
+        }
+        // Empty or whitespace-only placeholders name no claim.
+        if path.trim().is_empty() {
             return Err(DisplayNameTemplateError::EmptyPlaceholder);
         }
         sink(TemplateEvent::Claim(path));
@@ -1416,6 +1421,20 @@ mod test {
         );
         assert_eq!(
             DisplayNameTemplate::parse("{}"),
+            Err(DisplayNameTemplateError::EmptyPlaceholder)
+        );
+        // A `{` inside a placeholder means an earlier `{` was never closed.
+        assert_eq!(
+            DisplayNameTemplate::parse("{a{b}"),
+            Err(DisplayNameTemplateError::UnmatchedOpenBrace)
+        );
+        // A whitespace-only placeholder names no claim.
+        assert_eq!(
+            DisplayNameTemplate::parse("{ }"),
+            Err(DisplayNameTemplateError::EmptyPlaceholder)
+        );
+        assert_eq!(
+            DisplayNameTemplate::parse("{   }"),
             Err(DisplayNameTemplateError::EmptyPlaceholder)
         );
     }
