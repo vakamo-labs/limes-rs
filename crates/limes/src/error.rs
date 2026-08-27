@@ -11,6 +11,8 @@ pub enum RejectionReason {
     AudienceMismatch,
     /// The `iss` claim matched none of the accepted issuers.
     IssuerMismatch,
+    /// The scope required by `set_scope` is not present.
+    ScopeMissing,
     /// The named required-claim rule did not hold.
     ClaimRuleFailed { rule: String },
     /// None of the configured subject claims is present.
@@ -22,6 +24,7 @@ impl std::fmt::Display for RejectionReason {
         match self {
             Self::AudienceMismatch => f.write_str("audience is not accepted"),
             Self::IssuerMismatch => f.write_str("issuer is not accepted"),
+            Self::ScopeMissing => f.write_str("required scope is missing"),
             Self::ClaimRuleFailed { rule } => write!(f, "required-claim rule `{rule}` failed"),
             Self::SubjectClaimMissing => f.write_str("subject claim is missing"),
         }

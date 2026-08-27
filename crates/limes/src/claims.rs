@@ -8,6 +8,7 @@ use std::{borrow::Cow, collections::HashSet};
 
 /// How a string claim is split into values before set operators are applied.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Separator {
     /// Split on any Unicode whitespace (the OAuth `scope` convention).
     Whitespace,
@@ -17,6 +18,7 @@ pub enum Separator {
 
 /// The single operator of a [`ClaimRule`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ClaimOperator {
     /// At least one claim value is in the set.
     AnyOf(HashSet<String>),
@@ -40,6 +42,13 @@ pub enum ClaimRuleError {
     EmptyValue { operator: &'static str },
     #[error("separator must not be empty")]
     EmptySeparator,
+    /// A value the separator would split can never equal a split piece, so the rule could
+    /// never match it — and a `none_of` rule would never deny it.
+    #[error("{operator} value `{value}` contains the separator")]
+    ValueContainsSeparator {
+        operator: &'static str,
+        value: String,
+    },
 }
 
 /// A validated rule over one claim.
@@ -51,7 +60,9 @@ pub struct ClaimRule {
 }
 
 impl ClaimRule {
-    /// Build a rule for `claim` (a dotted path such as `realm_access.roles`).
+    /// Build a rule for `claim`, a claim name or a dotted path such as `realm_access.roles`.
+    /// A name containing dots (e.g. `https://example.com/roles`) is looked up as a whole key
+    /// first; only if no such key exists is it walked as a path.
     ///
     /// # Errors
     /// See [`ClaimRuleError`].
@@ -76,6 +87,17 @@ impl ClaimRule {
             }
             if values.iter().any(String::is_empty) {
                 return Err(ClaimRuleError::EmptyValue { operator: name });
+            }
+            let split_by_separator = |v: &str| match &separator {
+                Some(Separator::Whitespace) => v.contains(char::is_whitespace),
+                Some(Separator::Literal(sep)) => v.contains(sep.as_str()),
+                None => false,
+            };
+            if let Some(value) = values.iter().find(|v| split_by_separator(v)) {
+                return Err(ClaimRuleError::ValueContainsSeparator {
+                    operator: name,
+                    value: value.clone(),
+                });
             }
         }
         Ok(Self {
@@ -213,13 +235,16 @@ impl<'a> Iterator for ClaimValues<'a> {
     }
 }
 
-/// Navigate nested JSON claims using dot-notation (e.g. `resource_access.account.roles`).
-/// Returns the value at the path, or `None` if any segment is absent.
-#[must_use]
-pub fn navigate<'a>(
+/// Look up a claim by its whole name, or navigate nested claims using dot-notation
+/// (e.g. `resource_access.account.roles`) if no key of that name exists. Returns `None` if
+/// the path is absent.
+pub(crate) fn navigate<'a>(
     claims: &'a serde_json::Value,
     dot_path: &str,
 ) -> Option<&'a serde_json::Value> {
+    if let Some(whole) = claims.get(dot_path) {
+        return Some(whole);
+    }
     let mut current = claims;
     for part in dot_path.split('.') {
         current = current.get(part)?;
@@ -299,6 +324,32 @@ mod tests {
     }
 
     #[test]
+    fn new_rejects_values_the_separator_would_split() {
+        assert_eq!(
+            ClaimRule::new(
+                "groups",
+                Some(Separator::Whitespace),
+                none_of(&["Domain Admins"])
+            )
+            .unwrap_err(),
+            ClaimRuleError::ValueContainsSeparator {
+                operator: "none_of",
+                value: "Domain Admins".to_string(),
+            }
+        );
+        assert_eq!(
+            ClaimRule::new("c", Some(Separator::Literal(",".into())), any_of(&["a,b"]))
+                .unwrap_err(),
+            ClaimRuleError::ValueContainsSeparator {
+                operator: "any_of",
+                value: "a,b".to_string(),
+            }
+        );
+        // Without a separator a value may contain anything.
+        assert!(ClaimRule::new("c", None, none_of(&["Domain Admins"])).is_ok());
+    }
+
+    #[test]
     fn new_rejects_empty_literal_separator() {
         assert_eq!(
             ClaimRule::new("c", Some(Separator::Literal(String::new())), any_of(&["a"]))
@@ -354,6 +405,17 @@ mod tests {
         assert!(rule("c", any_of(&["1.5"])).matches(&claims_with(&json!(1.5))));
         assert!(rule("c", any_of(&["true"])).matches(&claims_with(&json!(true))));
         assert!(!rule("c", any_of(&["True"])).matches(&claims_with(&json!(true))));
+    }
+
+    #[test]
+    fn whitespace_only_string_with_separator_has_no_values() {
+        let claims = claims_with(&json!("   "));
+        let r = |op| rule_sep("c", Separator::Whitespace, op);
+        assert!(!r(any_of(&["a"])).matches(&claims));
+        assert!(!r(all_of(&["a"])).matches(&claims));
+        // Like an empty array: present, nothing to deny.
+        assert!(r(none_of(&["a"])).matches(&claims));
+        assert!(r(ClaimOperator::Exists(true)).matches(&claims));
     }
 
     #[test]
@@ -448,8 +510,9 @@ mod tests {
         let r = |op| rule_sep("c", Separator::Whitespace, op);
         assert!(r(all_of(&["openid", "email", "profile"])).matches(&claims));
         assert!(!r(any_of(&["open"])).matches(&claims));
-        // No empty values from the double space.
-        assert!(!r(any_of(&[" "])).matches(&claims));
+        // The double space yields no empty value.
+        assert!(!r(ClaimOperator::Exists(false)).matches(&claims));
+        assert!(r(none_of(&["x"])).matches(&claims));
     }
 
     #[test]
@@ -457,8 +520,11 @@ mod tests {
         let claims = claims_with(&json!("a,,b,"));
         let r = rule_sep("c", Separator::Literal(",".into()), all_of(&["a", "b"]));
         assert!(r.matches(&claims));
-        let r = rule_sep("c", Separator::Literal(",".into()), none_of(&["a,,b,"]));
+        // Exactly the two pieces: nothing else to deny.
+        let r = rule_sep("c", Separator::Literal(",".into()), none_of(&["c"]));
         assert!(r.matches(&claims));
+        let r = rule_sep("c", Separator::Literal(",".into()), none_of(&["b"]));
+        assert!(!r.matches(&claims));
     }
 
     #[test]
@@ -482,7 +548,7 @@ mod tests {
     #[test]
     fn separator_does_not_apply_to_numbers() {
         let claims = claims_with(&json!(1.5));
-        let r = rule_sep("c", Separator::Literal(".".into()), any_of(&["1.5"]));
+        let r = rule_sep("c", Separator::Literal(",".into()), any_of(&["1.5"]));
         assert!(r.matches(&claims));
     }
 
@@ -493,6 +559,23 @@ mod tests {
         let claims = json!({ "realm_access": { "roles": ["admin"] } });
         assert!(rule("realm_access.roles", any_of(&["admin"])).matches(&claims));
         assert!(!rule("realm_access.missing", ClaimOperator::Exists(true)).matches(&claims));
+    }
+
+    #[test]
+    fn claim_name_containing_dots_is_matched_as_a_whole_key_first() {
+        let claims = json!({ "https://example.com/roles": ["admin"], "a": { "b": "nested" } });
+        assert!(rule("https://example.com/roles", any_of(&["admin"])).matches(&claims));
+        assert!(rule("a.b", any_of(&["nested"])).matches(&claims));
+        // A whole key wins over a path of the same spelling.
+        let both = json!({ "a.b": "whole", "a": { "b": "nested" } });
+        assert!(rule("a.b", any_of(&["whole"])).matches(&both));
+        assert!(!rule("a.b", any_of(&["nested"])).matches(&both));
+    }
+
+    #[test]
+    fn fallback_is_not_consulted_when_primary_is_present_but_malformed() {
+        let r = rule("scope", any_of(&["x"])).or_claim("scp").unwrap();
+        assert!(!r.matches(&json!({ "scope": {"k": "v"}, "scp": ["x"] })));
     }
 
     #[test]

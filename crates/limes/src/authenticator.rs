@@ -177,10 +177,11 @@ impl Authentication {
 
     /// Get the scopes of the token from the `scope` claim, or `scp` if `scope` is absent.
     ///
-    /// Values are read exactly as scope enforcement reads them: a whitespace-delimited string
-    /// or an array of strings, each split on whitespace. A malformed claim (an object, or an
-    /// array holding non-strings) yields nothing. Returns an empty iterator if neither claim
-    /// is present.
+    /// Values are read as scope enforcement reads them: a whitespace-delimited string or an
+    /// array of strings, each split on whitespace; a malformed claim (an object, or an array
+    /// holding non-scalars) yields nothing. Numbers and booleans, which enforcement compares
+    /// by their string form, are omitted here. Returns an empty iterator if neither claim is
+    /// present.
     pub fn scopes(&self) -> impl Iterator<Item = &str> {
         let value = [SCOPE_CLAIM, SCP_CLAIM]
             .into_iter()
@@ -280,6 +281,12 @@ mod test {
             auth.scopes().collect::<Vec<_>>(),
             ["openid", "profile", "email"]
         );
+    }
+
+    #[test]
+    fn test_scopes_omits_numbers_and_booleans() {
+        let auth = auth_with_claims(serde_json::json!({ "scope": ["admin", 42, true] }));
+        assert_eq!(auth.scopes().collect::<Vec<_>>(), ["admin"]);
     }
 
     #[test]

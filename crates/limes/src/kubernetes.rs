@@ -146,9 +146,10 @@ impl Authenticator for KubernetesAuthenticator {
                     ));
                 }
                 IntrospectionResult::JWTBearer { iss, .. } => {
+                    // The token is not verified yet, so this is not a `TokenRejected`.
                     if !self.issuers.iter().any(|i| iss.contains(i)) {
-                        return Err(Error::rejected(
-                            crate::error::RejectionReason::IssuerMismatch,
+                        return Err(Error::unauthenticated(
+                            "Token issuer is not accepted by the Kubernetes Authenticator",
                         ));
                     }
                 }
