@@ -1,9 +1,11 @@
 //! Validate JWT tokens locally using JWKS keys fetched from a remote server.
 
-use crate::authenticator::SCOPE_CLAIM;
+use crate::authenticator::{SCOPE_CLAIM, SCP_CLAIM};
 use crate::introspect::IntrospectionResult;
 use crate::{
     Authentication, Authenticator, PrincipalType, Subject,
+    claims::{ClaimOperator, ClaimRule, Separator, navigate},
+    error::RejectionReason,
     error::{Error, Result},
 };
 use jsonwebtoken::{Algorithm, DecodingKey, Header, Validation};
@@ -58,7 +60,8 @@ pub struct JWKSWebAuthenticator {
     audiences: Vec<String>,
     client: JwksClient<WebSource>,
     issuers: Vec<String>,
-    scope: Option<String>,
+    scope: Option<ScopeRequirement>,
+    required_claims: Vec<(String, ClaimRule)>,
     config_url: url::Url,
     subject_claim: Vec<String>,
     role_claims: Option<Vec<String>>,
@@ -88,6 +91,7 @@ impl JWKSWebAuthenticator {
             issuers: vec![issuer],
             audiences: Vec::new(),
             scope: None,
+            required_claims: Vec::new(),
             config_url,
             subject_claim: vec![SUBJECT_CLAIM.to_string()],
             role_claims: None,
@@ -126,11 +130,25 @@ impl JWKSWebAuthenticator {
         self
     }
 
-    /// Add a scope to the authenticator.
-    /// If not called, no scope validation is done.
+    /// Require a scope. Calling again replaces the previously required scope.
+    ///
+    /// Read from the `scope` claim, or `scp` if `scope` is absent; a whitespace-delimited
+    /// string or an array of strings. Evaluated before [`with_required_claims`](Self::with_required_claims)
+    /// and reported as rule [`SCOPE_RULE_NAME`]. An empty scope can never be satisfied.
     #[must_use]
     pub fn set_scope(mut self, scope: String) -> Self {
-        self.scope = Some(scope);
+        self.scope = Some(ScopeRequirement::new(scope));
+        self
+    }
+
+    /// Require claim rules, evaluated in order after signature, issuer, audience and scope
+    /// checks. All rules must hold. Names appear only in errors and logs. Calling again appends.
+    #[must_use]
+    pub fn with_required_claims(
+        mut self,
+        rules: impl IntoIterator<Item = (String, ClaimRule)>,
+    ) -> Self {
+        self.required_claims.extend(rules);
         self
     }
 
@@ -303,7 +321,8 @@ impl Authenticator for JWKSWebAuthenticator {
             &key,
             &self.audiences,
             &self.issuers,
-            self.scope.as_deref(),
+            self.scope.as_ref(),
+            &self.required_claims,
         )?;
 
         extract_authentication(
@@ -344,7 +363,8 @@ fn authenticate_jwt(
     key: &JsonWebKey,
     audiences: &[String],
     issuers: &[String],
-    scope: Option<&str>,
+    scope: Option<&ScopeRequirement>,
+    required_claims: &[(String, ClaimRule)],
 ) -> Result<jsonwebtoken::TokenData<serde_json::Value>> {
     let mut validation = if let Some(alg) = key.alg() {
         Validation::new(Algorithm::from_str(alg).map_err(|e| {
@@ -361,13 +381,17 @@ fn authenticate_jwt(
         Validation::new(header.alg)
     };
 
+    // jsonwebtoken checks `aud`/`iss` only when the claim parses; requiring them makes an
+    // absent or malformed claim a rejection instead of a pass.
     if audiences.is_empty() {
         validation.validate_aud = false;
     } else {
         validation.set_audience(audiences);
         validation.validate_aud = true;
+        validation.required_spec_claims.insert("aud".to_string());
     }
     validation.set_issuer(issuers);
+    validation.required_spec_claims.insert("iss".to_string());
 
     let decoding_key = match key {
         JsonWebKey::Rsa(jwk) => DecodingKey::from_rsa_components(jwk.modulus(), jwk.exponent())
@@ -382,20 +406,39 @@ fn authenticate_jwt(
         })?,
     };
 
+    // jsonwebtoken verifies the signature before validating claims, so audience and
+    // issuer failures are rejections of a genuine token; everything else is unverifiable.
     let token_data = jsonwebtoken::decode::<serde_json::Value>(token, &decoding_key, &validation)
-        .map_err(|e| Error::JWTDecodeError {
-        reason: format!("Failed to decode JWT token. {e}"),
+        .map_err(|e| match e.kind() {
+        jsonwebtoken::errors::ErrorKind::InvalidAudience => {
+            Error::rejected(RejectionReason::AudienceMismatch)
+        }
+        jsonwebtoken::errors::ErrorKind::InvalidIssuer => {
+            Error::rejected(RejectionReason::IssuerMismatch)
+        }
+        jsonwebtoken::errors::ErrorKind::MissingRequiredClaim(claim) if claim == "aud" => {
+            Error::rejected(RejectionReason::AudienceMismatch)
+        }
+        jsonwebtoken::errors::ErrorKind::MissingRequiredClaim(claim) if claim == "iss" => {
+            Error::rejected(RejectionReason::IssuerMismatch)
+        }
+        _ => Error::JWTDecodeError {
+            reason: format!("Failed to decode JWT token. {e}"),
+        },
     })?;
 
-    if let Some(required_scope) = scope {
-        let scope_claim = token_data
-            .claims
-            .get(SCOPE_CLAIM)
-            .and_then(serde_json::Value::as_str);
-        if !scope_claim_contains(scope_claim, required_scope) {
-            return Err(Error::unauthenticated(format!(
-                "Token does not contain required scope `{required_scope}`."
-            )));
+    if scope.is_some_and(|scope| !scope.matches(&token_data.claims)) {
+        tracing::debug!(rule = SCOPE_RULE_NAME, "Required scope missing");
+        return Err(Error::rejected(RejectionReason::ClaimRuleFailed {
+            rule: SCOPE_RULE_NAME.to_string(),
+        }));
+    }
+    for (name, rule) in required_claims {
+        if !rule.matches(&token_data.claims) {
+            tracing::debug!(rule = name, "Required-claim rule failed");
+            return Err(Error::rejected(RejectionReason::ClaimRuleFailed {
+                rule: name.clone(),
+            }));
         }
     }
 
@@ -537,9 +580,7 @@ fn get_subject(
             return Ok(subject);
         }
     }
-    Err(Error::unauthenticated(
-        "Could not find the subject claim in the JWT token.".to_string(),
-    ))
+    Err(Error::rejected(RejectionReason::SubjectClaimMissing))
 }
 
 fn parse_human_name(claims: &serde_json::Value) -> Option<String> {
@@ -577,7 +618,15 @@ impl std::fmt::Debug for JWKSWebAuthenticator {
 
         r.field("audiences", &self.audiences)
             .field("issuers", &self.issuers)
-            .field("scope", &self.scope)
+            .field("scope", &self.scope.as_ref().map(ScopeRequirement::rule))
+            .field(
+                "required_claims",
+                &self
+                    .required_claims
+                    .iter()
+                    .map(|(name, rule)| (name.as_str(), rule.claims()))
+                    .collect::<Vec<_>>(),
+            )
             .field("config_url", &self.config_url)
             .field("subject_claim", &self.subject_claim)
             .field("client", &"jwks_client_rs::JwksClient<WebSource>")
@@ -589,16 +638,6 @@ impl std::fmt::Debug for JWKSWebAuthenticator {
 
 fn value_as_string(value: &serde_json::Value) -> Option<String> {
     value.as_str().map(std::string::ToString::to_string)
-}
-
-/// Navigate nested JSON claims using dot-notation (e.g. `resource_access.account.roles`).
-/// Returns the value at the path, or `None` if any segment is absent.
-fn navigate<'a>(claims: &'a serde_json::Value, dot_path: &str) -> Option<&'a serde_json::Value> {
-    let mut current = claims;
-    for part in dot_path.split('.') {
-        current = current.get(part)?;
-    }
-    Some(current)
 }
 
 /// A structurally invalid display-name template — one that can never render for
@@ -768,10 +807,40 @@ impl std::str::FromStr for DisplayNameTemplate {
     }
 }
 
-/// Returns `true` if the space-delimited `scope` claim contains `required`.
-/// Matches without allocating an intermediate collection.
-fn scope_claim_contains(scope_claim: Option<&str>, required: &str) -> bool {
-    scope_claim.is_some_and(|scopes| scopes.split_whitespace().any(|s| s == required))
+/// Name under which a failed [`JWKSWebAuthenticator::set_scope`] requirement is reported.
+pub const SCOPE_RULE_NAME: &str = "scope";
+
+/// The `set_scope` requirement: a rule on `scope`/`scp`, or unsatisfiable for an empty scope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ScopeRequirement {
+    Rule(ClaimRule),
+    Unsatisfiable,
+}
+
+impl ScopeRequirement {
+    fn new(scope: String) -> Self {
+        ClaimRule::new(
+            SCOPE_CLAIM,
+            Some(Separator::Whitespace),
+            ClaimOperator::AllOf(std::collections::HashSet::from([scope])),
+        )
+        .and_then(|r| r.or_claim(SCP_CLAIM))
+        .map_or(Self::Unsatisfiable, Self::Rule)
+    }
+
+    fn matches(&self, claims: &serde_json::Value) -> bool {
+        match self {
+            Self::Rule(rule) => rule.matches(claims),
+            Self::Unsatisfiable => false,
+        }
+    }
+
+    fn rule(&self) -> Option<&ClaimRule> {
+        match self {
+            Self::Rule(rule) => Some(rule),
+            Self::Unsatisfiable => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -780,26 +849,328 @@ mod test {
     use pretty_assertions::assert_eq;
     use std::collections::HashSet;
 
-    #[test]
-    fn test_scope_claim_contains_multi() {
-        assert!(scope_claim_contains(
-            Some("openid profile email"),
-            "profile"
-        ));
-        assert!(!scope_claim_contains(Some("openid profile email"), "admin"));
+    // ---- signed-token fixtures ----
+
+    fn ed25519_fixture() -> (jsonwebtoken::EncodingKey, JsonWebKey) {
+        use base64::Engine as _;
+        let key_pair = aws_lc_rs::signature::Ed25519KeyPair::generate().unwrap();
+        let pkcs8 = key_pair.to_pkcs8().unwrap();
+        let encoding_key = jsonwebtoken::EncodingKey::from_ed_der(pkcs8.as_ref());
+        let x = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(aws_lc_rs::signature::KeyPair::public_key(&key_pair).as_ref());
+        let jwk: JsonWebKey = serde_json::from_value(serde_json::json!({
+            "kty": "OKP", "crv": "Ed25519", "alg": "EdDSA", "kid": "k1", "x": x
+        }))
+        .unwrap();
+        (encoding_key, jwk)
+    }
+
+    fn sign(key: &jsonwebtoken::EncodingKey, mut claims: serde_json::Value) -> (String, Header) {
+        let exp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 3600;
+        claims["exp"] = serde_json::json!(exp);
+        let mut header = Header::new(Algorithm::EdDSA);
+        header.kid = Some("k1".to_string());
+        let token = jsonwebtoken::encode(&header, &claims, key).unwrap();
+        (token, header)
+    }
+
+    const ISS: &str = "https://idp.example.com";
+    const AUD: &str = "lakekeeper";
+
+    fn org_rule(org: &str) -> (String, ClaimRule) {
+        (
+            "org".to_string(),
+            ClaimRule::new(
+                "organizations",
+                None,
+                ClaimOperator::AnyOf(HashSet::from([org.to_string()])),
+            )
+            .unwrap(),
+        )
+    }
+
+    fn verify(
+        key: &JsonWebKey,
+        token: &str,
+        header: &Header,
+        rules: &[(String, ClaimRule)],
+    ) -> Result<jsonwebtoken::TokenData<serde_json::Value>> {
+        verify_with_scope(key, token, header, None, rules)
+    }
+
+    fn verify_with_scope(
+        key: &JsonWebKey,
+        token: &str,
+        header: &Header,
+        scope: Option<&ScopeRequirement>,
+        rules: &[(String, ClaimRule)],
+    ) -> Result<jsonwebtoken::TokenData<serde_json::Value>> {
+        authenticate_jwt(
+            token,
+            header,
+            key,
+            &[AUD.to_string()],
+            &[ISS.to_string()],
+            scope,
+            rules,
+        )
+    }
+
+    fn org_failed() -> Option<RejectionReason> {
+        Some(RejectionReason::ClaimRuleFailed {
+            rule: "org".to_string(),
+        })
     }
 
     #[test]
-    fn test_scope_claim_contains_single() {
-        assert!(scope_claim_contains(Some("openid"), "openid"));
-        // Must match a whole scope, not a prefix.
-        assert!(!scope_claim_contains(Some("openid"), "open"));
+    fn test_authenticate_jwt_accepts_token_satisfying_rules() {
+        let (enc, jwk) = ed25519_fixture();
+        let (token, header) = sign(
+            &enc,
+            serde_json::json!({ "iss": ISS, "aud": AUD, "sub": "u", "organizations": ["tenant-a"] }),
+        );
+        let data = verify(&jwk, &token, &header, &[org_rule("tenant-a")]).unwrap();
+        assert_eq!(data.claims["sub"], "u");
     }
 
     #[test]
-    fn test_scope_claim_contains_absent() {
-        assert!(!scope_claim_contains(None, "openid"));
-        assert!(!scope_claim_contains(Some(""), "openid"));
+    fn test_authenticate_jwt_rejects_failed_rule_with_typed_reason_and_no_values() {
+        let (enc, jwk) = ed25519_fixture();
+        let (token, header) = sign(
+            &enc,
+            serde_json::json!({ "iss": ISS, "aud": AUD, "sub": "u", "organizations": ["tenant-b"] }),
+        );
+        let err = verify(&jwk, &token, &header, &[org_rule("tenant-a")]).unwrap_err();
+        assert_eq!(err.rejection(), org_failed().as_ref());
+        let rendered = format!("{err} {err:?}");
+        assert!(!rendered.contains("tenant-a"), "{rendered}");
+        assert!(!rendered.contains("organizations"), "{rendered}");
+        assert!(!rendered.contains("tenant-b"), "{rendered}");
+    }
+
+    #[test]
+    fn test_authenticate_jwt_missing_claim_fails_closed() {
+        let (enc, jwk) = ed25519_fixture();
+        let (token, header) = sign(
+            &enc,
+            serde_json::json!({ "iss": ISS, "aud": AUD, "sub": "u" }),
+        );
+        let err = verify(&jwk, &token, &header, &[org_rule("tenant-a")]).unwrap_err();
+        assert_eq!(err.rejection(), org_failed().as_ref());
+    }
+
+    #[test]
+    fn test_authenticate_jwt_reports_first_failing_rule_in_order() {
+        let (enc, jwk) = ed25519_fixture();
+        let (token, header) = sign(
+            &enc,
+            serde_json::json!({ "iss": ISS, "aud": AUD, "sub": "u", "organizations": ["tenant-a"] }),
+        );
+        let scope = (
+            "scopes".to_string(),
+            ClaimRule::new(
+                "scope",
+                Some(Separator::Whitespace),
+                ClaimOperator::AllOf(HashSet::from(["openid".to_string()])),
+            )
+            .unwrap(),
+        );
+        let err = verify(&jwk, &token, &header, &[org_rule("tenant-a"), scope]).unwrap_err();
+        assert_eq!(
+            err.rejection(),
+            Some(&RejectionReason::ClaimRuleFailed {
+                rule: "scopes".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn test_authenticate_jwt_rejects_token_without_aud_when_audience_configured() {
+        let (enc, jwk) = ed25519_fixture();
+        let (token, header) = sign(&enc, serde_json::json!({ "iss": ISS, "sub": "u" }));
+        let err = verify(&jwk, &token, &header, &[]).unwrap_err();
+        assert_eq!(err.rejection(), Some(&RejectionReason::AudienceMismatch));
+    }
+
+    #[test]
+    fn test_authenticate_jwt_rejects_token_with_malformed_aud() {
+        let (enc, jwk) = ed25519_fixture();
+        let (token, header) = sign(
+            &enc,
+            serde_json::json!({ "iss": ISS, "aud": 42, "sub": "u" }),
+        );
+        let err = verify(&jwk, &token, &header, &[]).unwrap_err();
+        assert_eq!(err.rejection(), Some(&RejectionReason::AudienceMismatch));
+    }
+
+    #[test]
+    fn test_authenticate_jwt_rejects_token_without_iss() {
+        let (enc, jwk) = ed25519_fixture();
+        let (token, header) = sign(&enc, serde_json::json!({ "aud": AUD, "sub": "u" }));
+        let err = verify(&jwk, &token, &header, &[]).unwrap_err();
+        assert_eq!(err.rejection(), Some(&RejectionReason::IssuerMismatch));
+    }
+
+    #[test]
+    fn test_authenticate_jwt_accepts_token_without_aud_when_no_audience_configured() {
+        let (enc, jwk) = ed25519_fixture();
+        let (token, header) = sign(&enc, serde_json::json!({ "iss": ISS, "sub": "u" }));
+        let data =
+            authenticate_jwt(&token, &header, &jwk, &[], &[ISS.to_string()], None, &[]).unwrap();
+        assert_eq!(data.claims["sub"], "u");
+    }
+
+    #[test]
+    fn test_authenticate_jwt_classifies_audience_mismatch_without_values() {
+        let (enc, jwk) = ed25519_fixture();
+        let (token, header) = sign(
+            &enc,
+            serde_json::json!({ "iss": ISS, "aud": "someone-else", "sub": "u" }),
+        );
+        let err = verify(&jwk, &token, &header, &[]).unwrap_err();
+        assert_eq!(err.rejection(), Some(&RejectionReason::AudienceMismatch));
+        let rendered = format!("{err} {err:?}");
+        assert!(!rendered.contains("someone-else"), "{rendered}");
+        assert!(!rendered.contains(AUD), "{rendered}");
+    }
+
+    #[test]
+    fn test_authenticate_jwt_classifies_issuer_mismatch() {
+        let (enc, jwk) = ed25519_fixture();
+        let (token, header) = sign(
+            &enc,
+            serde_json::json!({ "iss": "https://evil.example.com", "aud": AUD, "sub": "u" }),
+        );
+        let err = verify(&jwk, &token, &header, &[]).unwrap_err();
+        assert_eq!(err.rejection(), Some(&RejectionReason::IssuerMismatch));
+    }
+
+    #[test]
+    fn test_authenticate_jwt_bad_signature_is_not_a_rejection() {
+        let (enc, _) = ed25519_fixture();
+        let (_, other_jwk) = ed25519_fixture();
+        let (token, header) = sign(
+            &enc,
+            serde_json::json!({ "iss": ISS, "aud": AUD, "sub": "u" }),
+        );
+        let err = verify(&other_jwk, &token, &header, &[]).unwrap_err();
+        assert!(matches!(err, Error::JWTDecodeError { .. }), "{err:?}");
+        assert_eq!(err.rejection(), None);
+    }
+
+    #[test]
+    fn test_authenticate_jwt_expired_is_not_a_rejection() {
+        let (enc, jwk) = ed25519_fixture();
+        let mut header = Header::new(Algorithm::EdDSA);
+        header.kid = Some("k1".to_string());
+        let token = jsonwebtoken::encode(
+            &header,
+            &serde_json::json!({ "iss": ISS, "aud": AUD, "sub": "u", "exp": 1 }),
+            &enc,
+        )
+        .unwrap();
+        let err = verify(&jwk, &token, &header, &[]).unwrap_err();
+        assert!(matches!(err, Error::JWTDecodeError { .. }), "{err:?}");
+    }
+
+    // ---- scope sugar ----
+
+    #[test]
+    fn test_scope_requirement_is_a_rule_with_scp_fallback() {
+        assert_eq!(
+            ScopeRequirement::new("openid".to_string()),
+            ScopeRequirement::Rule(
+                ClaimRule::new(
+                    SCOPE_CLAIM,
+                    Some(Separator::Whitespace),
+                    ClaimOperator::AllOf(HashSet::from(["openid".to_string()])),
+                )
+                .unwrap()
+                .or_claim("scp")
+                .unwrap()
+            )
+        );
+        assert_eq!(
+            ScopeRequirement::new(String::new()),
+            ScopeRequirement::Unsatisfiable
+        );
+    }
+
+    #[test]
+    fn test_scope_requirement_matches_previous_scope_check_cases() {
+        let scope = ScopeRequirement::new("profile".to_string());
+        let ok = |v: serde_json::Value| scope.matches(&serde_json::json!({ "scope": v }));
+        assert!(ok(serde_json::json!("openid profile email")));
+        assert!(ok(serde_json::json!("openid  profile\temail")));
+        assert!(ok(serde_json::json!("profile")));
+        assert!(!ok(serde_json::json!("openid email")));
+        // Whole scope, not a prefix.
+        assert!(!ok(serde_json::json!("profiles")));
+        assert!(!ok(serde_json::json!("")));
+        assert!(!scope.matches(&serde_json::json!({ "sub": "u" })));
+        // New: array-shaped scope claims and the `scp` claim.
+        assert!(ok(serde_json::json!(["openid", "profile"])));
+        assert!(scope.matches(&serde_json::json!({ "scp": ["profile"] })));
+        assert!(scope.matches(&serde_json::json!({ "scp": "openid profile" })));
+    }
+
+    fn scope_failed() -> Option<RejectionReason> {
+        Some(RejectionReason::ClaimRuleFailed {
+            rule: SCOPE_RULE_NAME.to_string(),
+        })
+    }
+
+    #[test]
+    fn test_empty_scope_rejects_every_token() {
+        let (enc, jwk) = ed25519_fixture();
+        let (token, header) = sign(
+            &enc,
+            serde_json::json!({ "iss": ISS, "aud": AUD, "sub": "u", "scope": "openid" }),
+        );
+        let scope = ScopeRequirement::new(String::new());
+        let err = verify_with_scope(&jwk, &token, &header, Some(&scope), &[]).unwrap_err();
+        assert_eq!(err.rejection(), scope_failed().as_ref());
+    }
+
+    #[test]
+    fn test_scope_failure_is_reported_before_required_claims() {
+        let (enc, jwk) = ed25519_fixture();
+        let (token, header) = sign(
+            &enc,
+            serde_json::json!({ "iss": ISS, "aud": AUD, "sub": "u", "scope": "openid" }),
+        );
+        let scope = ScopeRequirement::new("admin".to_string());
+        let err =
+            verify_with_scope(&jwk, &token, &header, Some(&scope), &[org_rule("x")]).unwrap_err();
+        assert_eq!(err.rejection(), scope_failed().as_ref());
+    }
+
+    #[test]
+    fn test_caller_rule_named_scope_is_kept_alongside_set_scope() {
+        // A caller rule may use any name, including the scope requirement's report name.
+        let (enc, jwk) = ed25519_fixture();
+        let (token, header) = sign(
+            &enc,
+            serde_json::json!({ "iss": ISS, "aud": AUD, "sub": "u", "scope": "admin" }),
+        );
+        let scope = ScopeRequirement::new("admin".to_string());
+        let caller = (SCOPE_RULE_NAME.to_string(), org_rule("tenant-a").1);
+        let err = verify_with_scope(&jwk, &token, &header, Some(&scope), &[caller]).unwrap_err();
+        assert_eq!(err.rejection(), scope_failed().as_ref());
+    }
+
+    #[test]
+    fn test_get_subject_missing_is_typed_rejection() {
+        let token_data = jsonwebtoken::TokenData {
+            header: Header::new(Algorithm::EdDSA),
+            claims: serde_json::json!({ "iss": ISS }),
+        };
+        let err = get_subject(&token_data, &["sub".to_string()]).unwrap_err();
+        assert_eq!(err.rejection(), Some(&RejectionReason::SubjectClaimMissing));
     }
 
     #[test]

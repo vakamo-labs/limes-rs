@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(claims)* `ClaimRule` — validated rules (`any_of`, `all_of`, `none_of`, `exists`, optional separator) over dotted claim paths, evaluated by `JWKSWebAuthenticator::with_required_claims` after signature, issuer and audience checks. Missing or malformed claims fail closed.
+- *(jwks)* `set_scope` accepts array-shaped `scope` claims and falls back to the `scp` claim; `Authentication::scopes()` does the same.
+- *(error)* `Error::TokenRejected { rejection: RejectionReason }` distinguishes rejected-but-verified tokens (audience, issuer, required claim, missing subject) from unverifiable ones. Carries rule names only, never claim values.
+
+### Changed
+
+- **Breaking:** `Error` is `#[non_exhaustive]`; `Error::AudienceMismatch` and `Error::IssuerMismatch` are replaced by `TokenRejected` (JWKS and Kubernetes authenticators). A missing subject claim, previously `Unauthenticated`, is `TokenRejected`.
+- *(jwks)* A token without an `aud` claim, or with an `aud` that is not a string or array of strings, is rejected when audiences are configured; a token without an `iss` claim is rejected. Previously such tokens passed audience/issuer validation.
+
 ## [0.5.0](https://github.com/vakamo-labs/limes-rs/compare/v0.4.2...v0.5.0) - 2026-08-08
 
 ### Added

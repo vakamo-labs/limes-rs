@@ -12,6 +12,8 @@ const NOT_BEFORE_CLAIM: &str = "nbf";
 /// The space-delimited OAuth `scope` claim. Shared with the JWKS authenticator so the key
 /// is defined in exactly one place.
 pub(crate) const SCOPE_CLAIM: &str = "scope";
+/// Array-shaped alternative to `scope` emitted by some IdPs; consulted when `scope` is absent.
+pub(crate) const SCP_CLAIM: &str = "scp";
 
 pub trait Authenticator
 where
@@ -173,16 +175,23 @@ impl Authentication {
             .and_then(serde_json::Value::as_str)
     }
 
-    /// Get the scopes of the token, parsed from the space-delimited `scope` claim.
+    /// Get the scopes of the token from the `scope` claim, or `scp` if `scope` is absent.
     ///
-    /// Returns an empty iterator if the `scope` claim is absent. Derived on demand from the
-    /// claims so unused scopes cost nothing on the authentication path.
+    /// Values are read exactly as scope enforcement reads them: a whitespace-delimited string
+    /// or an array of strings, each split on whitespace. A malformed claim (an object, or an
+    /// array holding non-strings) yields nothing. Returns an empty iterator if neither claim
+    /// is present.
     pub fn scopes(&self) -> impl Iterator<Item = &str> {
-        self.claims
-            .get(SCOPE_CLAIM)
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .split_whitespace()
+        let value = [SCOPE_CLAIM, SCP_CLAIM]
+            .into_iter()
+            .filter_map(|c| self.claims.get(c))
+            .find(|v| !v.is_null());
+        let items = value.and_then(crate::claims::scalars).unwrap_or_default();
+        crate::claims::ClaimValues::new(items, Some(&crate::claims::Separator::Whitespace))
+            .filter_map(|v| match v {
+                std::borrow::Cow::Borrowed(s) => Some(s),
+                std::borrow::Cow::Owned(_) => None,
+            })
     }
 
     #[must_use]
@@ -245,6 +254,40 @@ mod test {
             ["openid", "profile", "email"]
         );
         assert!(auth.all_claims().get("iss").is_some());
+    }
+
+    #[test]
+    fn test_scopes_accepts_array_claim() {
+        let auth = auth_with_claims(serde_json::json!({ "scope": ["openid", "email"] }));
+        assert_eq!(auth.scopes().collect::<Vec<_>>(), ["openid", "email"]);
+    }
+
+    #[test]
+    fn test_scopes_falls_back_to_scp() {
+        let auth = auth_with_claims(serde_json::json!({ "scp": ["openid", "email"] }));
+        assert_eq!(auth.scopes().collect::<Vec<_>>(), ["openid", "email"]);
+        let auth = auth_with_claims(serde_json::json!({ "scp": "openid email" }));
+        assert_eq!(auth.scopes().collect::<Vec<_>>(), ["openid", "email"]);
+        // `scope` present wins, even when `scp` is also present.
+        let auth = auth_with_claims(serde_json::json!({ "scope": "a", "scp": "b" }));
+        assert_eq!(auth.scopes().collect::<Vec<_>>(), ["a"]);
+    }
+
+    #[test]
+    fn test_scopes_splits_array_elements_like_enforcement() {
+        let auth = auth_with_claims(serde_json::json!({ "scope": ["openid profile", "email"] }));
+        assert_eq!(
+            auth.scopes().collect::<Vec<_>>(),
+            ["openid", "profile", "email"]
+        );
+    }
+
+    #[test]
+    fn test_scopes_of_malformed_claim_are_empty_like_enforcement() {
+        let auth = auth_with_claims(serde_json::json!({ "scope": ["admin", {"k": "v"}] }));
+        assert_eq!(auth.scopes().count(), 0);
+        let auth = auth_with_claims(serde_json::json!({ "scope": ["admin", null] }));
+        assert_eq!(auth.scopes().count(), 0);
     }
 
     #[test]

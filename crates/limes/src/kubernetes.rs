@@ -147,10 +147,9 @@ impl Authenticator for KubernetesAuthenticator {
                 }
                 IntrospectionResult::JWTBearer { iss, .. } => {
                     if !self.issuers.iter().any(|i| iss.contains(i)) {
-                        return Err(Error::IssuerMismatch {
-                            expected: self.issuers.clone(),
-                            actual: iss.iter().cloned().collect(),
-                        });
+                        return Err(Error::rejected(
+                            crate::error::RejectionReason::IssuerMismatch,
+                        ));
                     }
                 }
             }
@@ -288,10 +287,9 @@ fn validate_audience(expected: &[String], received: &[String]) -> Result<()> {
     }
 
     if !expected.iter().any(|expected| received.contains(expected)) {
-        return Err(Error::AudienceMismatch {
-            expected: expected.to_vec(),
-            actual: received.to_vec(),
-        });
+        return Err(Error::rejected(
+            crate::error::RejectionReason::AudienceMismatch,
+        ));
     }
 
     Ok(())
