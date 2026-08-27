@@ -146,6 +146,7 @@
 
 mod authenticator;
 mod chain;
+pub mod claims;
 pub mod error;
 pub mod introspect;
 #[cfg(feature = "jwks")]
@@ -157,6 +158,8 @@ pub mod kubernetes;
 
 pub use authenticator::{Authentication, Authenticator, PrincipalType};
 pub use chain::{AuthenticatorChain, AuthenticatorChainBuilder, AuthenticatorEnum};
+pub use claims::{ClaimOperator, ClaimRule, ClaimRuleError, Separator};
+pub use error::RejectionReason;
 pub use subject::Subject;
 
 pub use subject::{format_subject, parse_subject};

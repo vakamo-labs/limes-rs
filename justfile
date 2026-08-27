@@ -7,7 +7,7 @@ check-format:
 	cargo fmt --all -- --check
 
 check-clippy:
-	cargo clippy --all-features --workspace -- -D warnings
+	cargo clippy --all-features --all-targets --workspace -- -D warnings
 	cargo clippy --workspace -- -D warnings
 	cargo clippy --workspace --no-default-features -- -D warnings
 	cargo clippy --workspace --features "all" -- -D warnings

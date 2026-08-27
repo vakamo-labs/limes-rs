@@ -146,11 +146,11 @@ impl Authenticator for KubernetesAuthenticator {
                     ));
                 }
                 IntrospectionResult::JWTBearer { iss, .. } => {
+                    // The token is not verified yet, so this is not a `TokenRejected`.
                     if !self.issuers.iter().any(|i| iss.contains(i)) {
-                        return Err(Error::IssuerMismatch {
-                            expected: self.issuers.clone(),
-                            actual: iss.iter().cloned().collect(),
-                        });
+                        return Err(Error::unauthenticated(
+                            "Token issuer is not accepted by the Kubernetes Authenticator",
+                        ));
                     }
                 }
             }
@@ -288,10 +288,9 @@ fn validate_audience(expected: &[String], received: &[String]) -> Result<()> {
     }
 
     if !expected.iter().any(|expected| received.contains(expected)) {
-        return Err(Error::AudienceMismatch {
-            expected: expected.to_vec(),
-            actual: received.to_vec(),
-        });
+        return Err(Error::rejected(
+            crate::error::RejectionReason::AudienceMismatch,
+        ));
     }
 
     Ok(())

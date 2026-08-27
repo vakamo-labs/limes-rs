@@ -1,6 +1,40 @@
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Why a cryptographically verified token was rejected.
+///
+/// Carries names only — never presented or expected claim values — so it is safe to log
+/// and audit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RejectionReason {
+    /// The `aud` claim matched none of the accepted audiences.
+    AudienceMismatch,
+    /// The `iss` claim matched none of the accepted issuers.
+    IssuerMismatch,
+    /// The scope required by `set_scope` is not present.
+    ScopeMissing,
+    /// The named required-claim rule did not hold.
+    ClaimRuleFailed { rule: String },
+    /// None of the configured subject claims is present.
+    SubjectClaimMissing,
+}
+
+impl std::error::Error for RejectionReason {}
+
+impl std::fmt::Display for RejectionReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AudienceMismatch => f.write_str("audience is not accepted"),
+            Self::IssuerMismatch => f.write_str("issuer is not accepted"),
+            Self::ScopeMissing => f.write_str("required scope is missing"),
+            Self::ClaimRuleFailed { rule } => write!(f, "required-claim rule `{rule}` failed"),
+            Self::SubjectClaimMissing => f.write_str("subject claim is missing"),
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
     #[error("Could not parse subject from string: {subject}")]
     InvalidSubject { subject: String },
@@ -12,15 +46,17 @@ pub enum Error {
     KubernetesTokenReviewError(#[source] kube::Error),
     #[error("Authentication failed: {reason}")]
     Unauthenticated { reason: String },
-    #[error("Audience mismatch: expected {expected:?}, got {actual:?}")]
-    AudienceMismatch {
-        expected: Vec<String>,
-        actual: Vec<String>,
+    /// A scope passed to `set_scope` that no token could satisfy.
+    #[error("Invalid scope: {source}")]
+    InvalidScope {
+        #[source]
+        source: crate::claims::ClaimRuleError,
     },
-    #[error("Issuer mismatch: expected {expected:?}, got {actual:?}")]
-    IssuerMismatch {
-        expected: Vec<String>,
-        actual: Vec<String>,
+    /// A token whose signature verified was rejected by claim validation.
+    #[error("Token rejected: {rejection}")]
+    TokenRejected {
+        #[source]
+        rejection: RejectionReason,
     },
     #[error("Failed to parse URL: {0}")]
     UrlParseError(#[from] url::ParseError),
@@ -55,6 +91,20 @@ pub enum Error {
 }
 
 impl Error {
+    #[must_use]
+    pub fn rejected(rejection: RejectionReason) -> Self {
+        Self::TokenRejected { rejection }
+    }
+
+    /// The typed reason if this is a [`Error::TokenRejected`].
+    #[must_use]
+    pub fn rejection(&self) -> Option<&RejectionReason> {
+        match self {
+            Self::TokenRejected { rejection } => Some(rejection),
+            _ => None,
+        }
+    }
+
     pub fn unauthenticated(reason: impl Into<String>) -> Self {
         Self::Unauthenticated {
             reason: reason.into(),
