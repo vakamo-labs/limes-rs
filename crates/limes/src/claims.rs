@@ -25,6 +25,11 @@ pub enum ClaimOperator {
     /// Every value of the set is a claim value.
     AllOf(HashSet<String>),
     /// No claim value is in the set. A missing claim fails.
+    ///
+    /// A value is the *whole* string unless a separator is configured: without one,
+    /// `none_of ["admin"]` does NOT fire on `"scope": "openid admin"` — that claim's single
+    /// value is `"openid admin"`. Configure the separator that matches the claim's format
+    /// when denying values inside delimited strings.
     NoneOf(HashSet<String>),
     /// `true`: the claim is present and not `null`; `false`: absent or `null`.
     Exists(bool),
@@ -60,18 +65,73 @@ pub struct ClaimRule {
 }
 
 impl ClaimRule {
-    /// Build a rule for `claim`, a claim name or a dotted path such as `realm_access.roles`.
-    /// A name containing dots (e.g. `https://example.com/roles`) is looked up as a whole key
-    /// first; only if no such key exists is it walked as a path.
+    /// At least one of `values` must be a value of `claim`.
+    ///
+    /// `claim` is a claim name or a dotted path such as `realm_access.roles`. Every dot
+    /// nests: a claim whose name itself contains a dot (e.g. the URI-shaped
+    /// `https://example.com/roles`) is not addressable. The same applies to all constructors.
     ///
     /// # Errors
     /// See [`ClaimRuleError`].
-    pub fn new(
+    pub fn any_of<I: IntoIterator<Item = S>, S: Into<String>>(
+        claim: impl Into<String>,
+        values: I,
+    ) -> Result<Self, ClaimRuleError> {
+        Self::new(claim, None, ClaimOperator::AnyOf(collect(values)))
+    }
+
+    /// Every one of `values` must be a value of `claim`.
+    ///
+    /// # Errors
+    /// See [`ClaimRuleError`].
+    pub fn all_of<I: IntoIterator<Item = S>, S: Into<String>>(
+        claim: impl Into<String>,
+        values: I,
+    ) -> Result<Self, ClaimRuleError> {
+        Self::new(claim, None, ClaimOperator::AllOf(collect(values)))
+    }
+
+    /// None of `values` may be a value of `claim`; a missing claim fails.
+    ///
+    /// # Errors
+    /// See [`ClaimRuleError`].
+    pub fn none_of<I: IntoIterator<Item = S>, S: Into<String>>(
+        claim: impl Into<String>,
+        values: I,
+    ) -> Result<Self, ClaimRuleError> {
+        Self::new(claim, None, ClaimOperator::NoneOf(collect(values)))
+    }
+
+    /// `claim` must be present and not `null` (`true`), or absent or `null` (`false`).
+    ///
+    /// # Errors
+    /// See [`ClaimRuleError`].
+    pub fn exists(claim: impl Into<String>, expected: bool) -> Result<Self, ClaimRuleError> {
+        Self::new(claim, None, ClaimOperator::Exists(expected))
+    }
+
+    /// Split string claim values on `separator` before matching.
+    ///
+    /// # Errors
+    /// [`ClaimRuleError::EmptySeparator`], or [`ClaimRuleError::ValueContainsSeparator`] if a
+    /// listed value contains the separator (it could never match a split piece).
+    pub fn with_separator(self, separator: Separator) -> Result<Self, ClaimRuleError> {
+        Self::new_with_claims(self.claims, Some(separator), self.operator)
+    }
+
+    pub(crate) fn new(
         claim: impl Into<String>,
         separator: Option<Separator>,
         operator: ClaimOperator,
     ) -> Result<Self, ClaimRuleError> {
-        let claim = validate_path(claim.into())?;
+        Self::new_with_claims(vec![validate_path(claim.into())?], separator, operator)
+    }
+
+    fn new_with_claims(
+        claims: Vec<String>,
+        separator: Option<Separator>,
+        operator: ClaimOperator,
+    ) -> Result<Self, ClaimRuleError> {
         if matches!(&separator, Some(Separator::Literal(literal)) if literal.is_empty()) {
             return Err(ClaimRuleError::EmptySeparator);
         }
@@ -101,7 +161,7 @@ impl ClaimRule {
             }
         }
         Ok(Self {
-            claims: vec![claim],
+            claims,
             separator,
             operator,
         })
@@ -121,13 +181,13 @@ impl ClaimRule {
 
     /// The claim paths in lookup order.
     #[must_use]
-    pub fn claims(&self) -> &[String] {
+    pub(crate) fn claims(&self) -> &[String] {
         &self.claims
     }
 
     /// The operator.
-    #[must_use]
-    pub fn operator(&self) -> &ClaimOperator {
+    #[cfg(test)]
+    pub(crate) fn operator(&self) -> &ClaimOperator {
         &self.operator
     }
 
@@ -171,8 +231,24 @@ pub(crate) fn scalars(value: &serde_json::Value) -> Option<&[serde_json::Value]>
     }
 }
 
+/// Like [`scalars`], but only a string or an array of strings qualifies; numbers and booleans
+/// make the claim malformed. Used for scopes, which are strings by definition.
+pub(crate) fn strings(value: &serde_json::Value) -> Option<&[serde_json::Value]> {
+    match value {
+        serde_json::Value::Array(items) if items.iter().all(serde_json::Value::is_string) => {
+            Some(items)
+        }
+        serde_json::Value::String(_) => Some(std::slice::from_ref(value)),
+        _ => None,
+    }
+}
+
 fn is_scalar(value: &serde_json::Value) -> bool {
     value.is_string() || value.is_number() || value.is_boolean()
+}
+
+fn collect<I: IntoIterator<Item = S>, S: Into<String>>(values: I) -> HashSet<String> {
+    values.into_iter().map(Into::into).collect()
 }
 
 fn validate_path(path: String) -> Result<String, ClaimRuleError> {
@@ -235,16 +311,14 @@ impl<'a> Iterator for ClaimValues<'a> {
     }
 }
 
-/// Look up a claim by its whole name, or navigate nested claims using dot-notation
-/// (e.g. `resource_access.account.roles`) if no key of that name exists. Returns `None` if
-/// the path is absent.
+/// Navigate nested claims using dot-notation (e.g. `resource_access.account.roles`).
+/// Every dot nests — a claim whose *name* contains a dot (e.g. the URI-shaped
+/// `https://example.com/roles`) is not addressable, so a flat key can never shadow the
+/// nested claim a rule targets. Returns `None` if the path is absent.
 pub(crate) fn navigate<'a>(
     claims: &'a serde_json::Value,
     dot_path: &str,
 ) -> Option<&'a serde_json::Value> {
-    if let Some(whole) = claims.get(dot_path) {
-        return Some(whole);
-    }
     let mut current = claims;
     for part in dot_path.split('.') {
         current = current.get(part)?;
@@ -281,6 +355,57 @@ mod tests {
     }
 
     // ---- construction ----
+
+    #[test]
+    fn named_constructors_build_the_same_rules_as_new() {
+        assert_eq!(
+            ClaimRule::any_of("c", ["a", "b"]).unwrap(),
+            rule("c", any_of(&["a", "b"]))
+        );
+        assert_eq!(
+            ClaimRule::all_of("c", ["a"]).unwrap(),
+            rule("c", all_of(&["a"]))
+        );
+        assert_eq!(
+            ClaimRule::none_of("c", ["a"]).unwrap(),
+            rule("c", none_of(&["a"]))
+        );
+        assert_eq!(
+            ClaimRule::exists("c", true).unwrap(),
+            rule("c", ClaimOperator::Exists(true))
+        );
+        assert_eq!(
+            ClaimRule::any_of("c", ["a"])
+                .unwrap()
+                .with_separator(Separator::Whitespace)
+                .unwrap(),
+            rule_sep("c", Separator::Whitespace, any_of(&["a"]))
+        );
+        // `with_separator` revalidates values against the separator.
+        assert_eq!(
+            ClaimRule::none_of("groups", ["Domain Admins"])
+                .unwrap()
+                .with_separator(Separator::Whitespace)
+                .unwrap_err(),
+            ClaimRuleError::ValueContainsSeparator {
+                operator: "none_of",
+                value: "Domain Admins".to_string(),
+            }
+        );
+        // The separator survives `or_claim`.
+        assert_eq!(
+            ClaimRule::all_of("scope", ["x"])
+                .unwrap()
+                .with_separator(Separator::Whitespace)
+                .unwrap()
+                .or_claim("scp")
+                .unwrap(),
+            ClaimRule::new("scope", Some(Separator::Whitespace), all_of(&["x"]))
+                .unwrap()
+                .or_claim("scp")
+                .unwrap()
+        );
+    }
 
     #[test]
     fn new_rejects_empty_claim_path() {
@@ -561,15 +686,39 @@ mod tests {
         assert!(!rule("realm_access.missing", ClaimOperator::Exists(true)).matches(&claims));
     }
 
+    /// Every dot nests. A flat key spelled like the path is a *different*, unaddressable
+    /// claim — it can never shadow the nested claim a rule targets, so a token cannot
+    /// smuggle a flat `realm_access.roles` key past a deny rule.
     #[test]
-    fn claim_name_containing_dots_is_matched_as_a_whole_key_first() {
-        let claims = json!({ "https://example.com/roles": ["admin"], "a": { "b": "nested" } });
-        assert!(rule("https://example.com/roles", any_of(&["admin"])).matches(&claims));
-        assert!(rule("a.b", any_of(&["nested"])).matches(&claims));
-        // A whole key wins over a path of the same spelling.
-        let both = json!({ "a.b": "whole", "a": { "b": "nested" } });
-        assert!(rule("a.b", any_of(&["whole"])).matches(&both));
-        assert!(!rule("a.b", any_of(&["nested"])).matches(&both));
+    fn dots_always_nest_and_flat_keys_never_shadow() {
+        let both = json!({ "a.b": "flat", "a": { "b": "nested" } });
+        assert!(rule("a.b", any_of(&["nested"])).matches(&both));
+        assert!(!rule("a.b", any_of(&["flat"])).matches(&both));
+
+        let attack = json!({
+            "realm_access.roles": ["ok"],
+            "realm_access": { "roles": ["banned"] },
+        });
+        assert!(!rule("realm_access.roles", none_of(&["banned"])).matches(&attack));
+
+        // A `null` flat key cannot hide the nested claim from `exists`.
+        let null_flat = json!({ "a.b": null, "a": { "b": "real" } });
+        assert!(rule("a.b", ClaimOperator::Exists(true)).matches(&null_flat));
+        assert!(!rule("a.b", ClaimOperator::Exists(false)).matches(&null_flat));
+
+        // Consequence: a URI-shaped claim name is not addressable.
+        let uri = json!({ "https://example.com/roles": ["admin"] });
+        assert!(!rule("https://example.com/roles", any_of(&["admin"])).matches(&uri));
+        assert!(!rule("https://example.com/roles", ClaimOperator::Exists(true)).matches(&uri));
+    }
+
+    /// Pins the documented `none_of` semantics: without a separator the whole string is one
+    /// value, so denies inside delimited strings need the matching separator.
+    #[test]
+    fn none_of_without_separator_treats_the_whole_string_as_one_value() {
+        let claims = claims_with(&json!("openid admin"));
+        assert!(rule("c", none_of(&["admin"])).matches(&claims));
+        assert!(!rule_sep("c", Separator::Whitespace, none_of(&["admin"])).matches(&claims));
     }
 
     #[test]

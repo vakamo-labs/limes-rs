@@ -19,6 +19,8 @@ pub enum RejectionReason {
     SubjectClaimMissing,
 }
 
+impl std::error::Error for RejectionReason {}
+
 impl std::fmt::Display for RejectionReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -44,9 +46,18 @@ pub enum Error {
     KubernetesTokenReviewError(#[source] kube::Error),
     #[error("Authentication failed: {reason}")]
     Unauthenticated { reason: String },
+    /// A scope passed to `set_scope` that no token could satisfy.
+    #[error("Invalid scope: {source}")]
+    InvalidScope {
+        #[source]
+        source: crate::claims::ClaimRuleError,
+    },
     /// A token whose signature verified was rejected by claim validation.
     #[error("Token rejected: {rejection}")]
-    TokenRejected { rejection: RejectionReason },
+    TokenRejected {
+        #[source]
+        rejection: RejectionReason,
+    },
     #[error("Failed to parse URL: {0}")]
     UrlParseError(#[from] url::ParseError),
     #[cfg(feature = "jwks")]

@@ -15,6 +15,14 @@ pub(crate) const SCOPE_CLAIM: &str = "scope";
 /// Array-shaped alternative to `scope` emitted by some IdPs; consulted when `scope` is absent.
 pub(crate) const SCP_CLAIM: &str = "scp";
 
+/// The `scope` claim, or `scp` if `scope` is absent or `null`.
+pub(crate) fn scope_claim(claims: &serde_json::Value) -> Option<&serde_json::Value> {
+    [SCOPE_CLAIM, SCP_CLAIM]
+        .into_iter()
+        .filter_map(|c| claims.get(c))
+        .find(|v| !v.is_null())
+}
+
 pub trait Authenticator
 where
     Self: Send + Sync + Clone,
@@ -177,17 +185,14 @@ impl Authentication {
 
     /// Get the scopes of the token from the `scope` claim, or `scp` if `scope` is absent.
     ///
-    /// Values are read as scope enforcement reads them: a whitespace-delimited string or an
-    /// array of strings, each split on whitespace; a malformed claim (an object, or an array
-    /// holding non-scalars) yields nothing. Numbers and booleans, which enforcement compares
-    /// by their string form, are omitted here. Returns an empty iterator if neither claim is
-    /// present.
+    /// Values are read exactly as scope enforcement reads them: a whitespace-delimited string
+    /// or an array of strings, each split on whitespace. Anything else (an object, a number,
+    /// or an array holding non-strings) is malformed and yields nothing. Returns an empty
+    /// iterator if neither claim is present.
     pub fn scopes(&self) -> impl Iterator<Item = &str> {
-        let value = [SCOPE_CLAIM, SCP_CLAIM]
-            .into_iter()
-            .filter_map(|c| self.claims.get(c))
-            .find(|v| !v.is_null());
-        let items = value.and_then(crate::claims::scalars).unwrap_or_default();
+        let items = scope_claim(&self.claims)
+            .and_then(crate::claims::strings)
+            .unwrap_or_default();
         crate::claims::ClaimValues::new(items, Some(&crate::claims::Separator::Whitespace))
             .filter_map(|v| match v {
                 std::borrow::Cow::Borrowed(s) => Some(s),
@@ -284,9 +289,11 @@ mod test {
     }
 
     #[test]
-    fn test_scopes_omits_numbers_and_booleans() {
+    fn test_scopes_of_claim_with_numbers_or_booleans_are_empty_like_enforcement() {
         let auth = auth_with_claims(serde_json::json!({ "scope": ["admin", 42, true] }));
-        assert_eq!(auth.scopes().collect::<Vec<_>>(), ["admin"]);
+        assert_eq!(auth.scopes().count(), 0);
+        let auth = auth_with_claims(serde_json::json!({ "scope": 42 }));
+        assert_eq!(auth.scopes().count(), 0);
     }
 
     #[test]

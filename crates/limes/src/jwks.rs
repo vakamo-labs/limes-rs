@@ -66,7 +66,7 @@ struct Inner {
     audiences: Vec<String>,
     client: JwksClient<WebSource>,
     issuers: Vec<String>,
-    scope: Option<ScopeRequirement>,
+    scope: Option<ScopeRule>,
     required_claims: Vec<(String, ClaimRule)>,
     config_url: url::Url,
     subject_claim: Vec<String>,
@@ -143,19 +143,25 @@ impl JWKSWebAuthenticator {
     /// Require a scope. Calling again replaces the previously required scope.
     ///
     /// Read from the `scope` claim, or `scp` if `scope` is absent; a whitespace-delimited
-    /// string or an array of strings. Evaluated before
+    /// string or an array of strings, whose values must be strings. Evaluated before
     /// [`with_required_claims`](Self::with_required_claims); a failure is reported as
-    /// [`RejectionReason::ScopeMissing`]. A single scope is required: an empty scope, or
-    /// one containing whitespace, can never be satisfied.
-    #[must_use]
-    pub fn set_scope(mut self, scope: String) -> Self {
-        std::sync::Arc::make_mut(&mut self.inner).scope = Some(ScopeRequirement::new(scope));
-        self
+    /// [`RejectionReason::ScopeMissing`].
+    ///
+    /// # Errors
+    /// If `scope` is empty or contains whitespace — such a scope could never be satisfied.
+    pub fn set_scope(mut self, scope: String) -> Result<Self> {
+        std::sync::Arc::make_mut(&mut self.inner).scope = Some(ScopeRule::new(scope)?);
+        Ok(self)
     }
 
     /// Require claim rules, evaluated in order after signature, issuer, audience and scope
     /// checks. All rules must hold. Names appear only in errors and logs. Calling again
     /// replaces the previously set rules.
+    ///
+    /// Audience validation accepts a token whose `aud` merely intersects the accepted set —
+    /// a token minted for several audiences authenticates here too. To bind tokens to one
+    /// client, additionally require the authorized party:
+    /// `ClaimRule::any_of("azp", [client_id])`.
     #[must_use]
     pub fn with_required_claims(
         mut self,
@@ -317,18 +323,22 @@ impl Authenticator for JWKSWebAuthenticator {
         let key_id = header.kid.as_deref().ok_or_else(|| Error::JWTDecodeError {
             reason: "Token does not contain a key id".to_string(),
         })?;
-        let key = self
-            .inner
-            .client
-            .get_opt(key_id)
-            .await
-            .map_err(|e| Error::RefreshOpenIDWellKnownConfigError {
-                url: self.inner.config_url.to_string(),
-                reason: e.to_string(),
-            })?
-            .ok_or_else(|| {
-                Error::unauthenticated(format!("Key id `{key_id}` not found in JWKS."))
-            })?;
+        let key = self.inner.client.get(key_id).await.map_err(|e| {
+            // `jwks_client_rs` keeps its error enum private, so `KeyNotFound` — the token
+            // names a key the IdP does not publish — is only recognizable by its message
+            // ("Cannot find key for key_id: …"). That case is an authentication failure of
+            // this token, not an IdP problem; the attacker-controlled key id is not
+            // reproduced in the error. A future message change degrades only the error
+            // classification, never admits a token.
+            if e.to_string().starts_with("Cannot find key for key_id") {
+                Error::unauthenticated("Token key id not found in JWKS.")
+            } else {
+                Error::RefreshOpenIDWellKnownConfigError {
+                    url: self.inner.config_url.to_string(),
+                    reason: e.to_string(),
+                }
+            }
+        })?;
         let token_data = authenticate_jwt(
             token,
             header,
@@ -379,7 +389,7 @@ fn authenticate_jwt(
     key: &JsonWebKey,
     audiences: &[String],
     issuers: &[String],
-    scope: Option<&ScopeRequirement>,
+    scope: Option<&ScopeRule>,
     required_claims: &[(String, ClaimRule)],
 ) -> Result<jsonwebtoken::TokenData<serde_json::Value>> {
     let mut validation = if let Some(alg) = key.alg() {
@@ -408,6 +418,9 @@ fn authenticate_jwt(
     }
     validation.set_issuer(issuers);
     validation.required_spec_claims.insert("iss".to_string());
+    // `exp` is validated by default; `nbf` (RFC 7519 §4.1.5) is opt-in. A token before its
+    // `nbf` is not yet valid. An absent `nbf` stays acceptable.
+    validation.validate_nbf = true;
 
     let decoding_key = match key {
         JsonWebKey::Rsa(jwk) => DecodingKey::from_rsa_components(jwk.modulus(), jwk.exponent())
@@ -636,10 +649,7 @@ impl std::fmt::Debug for JWKSWebAuthenticator {
 
         r.field("audiences", &self.inner.audiences)
             .field("issuers", &self.inner.issuers)
-            .field(
-                "scope",
-                &self.inner.scope.as_ref().map(ScopeRequirement::rule),
-            )
+            .field("scope", &self.inner.scope.as_ref().map(|s| s.0.claims()))
             .field(
                 "required_claims",
                 &self
@@ -829,37 +839,29 @@ impl std::str::FromStr for DisplayNameTemplate {
     }
 }
 
-/// The `set_scope` requirement: a rule on `scope`/`scp`, or unsatisfiable when the scope is
-/// empty or contains whitespace (a whitespace-split value can never equal it).
+/// The `set_scope` requirement: a whitespace-split `all_of` rule on `scope`/`scp`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum ScopeRequirement {
-    Rule(ClaimRule),
-    Unsatisfiable,
-}
+struct ScopeRule(ClaimRule);
 
-impl ScopeRequirement {
-    fn new(scope: String) -> Self {
+impl ScopeRule {
+    fn new(scope: String) -> Result<Self> {
         ClaimRule::new(
             SCOPE_CLAIM,
             Some(Separator::Whitespace),
             ClaimOperator::AllOf(std::collections::HashSet::from([scope])),
         )
         .and_then(|r| r.or_claim(SCP_CLAIM))
-        .map_or(Self::Unsatisfiable, Self::Rule)
+        .map(Self)
+        .map_err(|e| Error::InvalidScope { source: e })
     }
 
+    /// Scopes are strings: a claim holding numbers or booleans is malformed and never
+    /// satisfies the requirement, matching [`Authentication::scopes`].
     fn matches(&self, claims: &serde_json::Value) -> bool {
-        match self {
-            Self::Rule(rule) => rule.matches(claims),
-            Self::Unsatisfiable => false,
-        }
-    }
-
-    fn rule(&self) -> Option<&ClaimRule> {
-        match self {
-            Self::Rule(rule) => Some(rule),
-            Self::Unsatisfiable => None,
-        }
+        crate::authenticator::scope_claim(claims)
+            .and_then(crate::claims::strings)
+            .is_some()
+            && self.0.matches(claims)
     }
 }
 
@@ -926,7 +928,7 @@ mod test {
         key: &JsonWebKey,
         token: &str,
         header: &Header,
-        scope: Option<&ScopeRequirement>,
+        scope: Option<&ScopeRule>,
         rules: &[(String, ClaimRule)],
     ) -> Result<jsonwebtoken::TokenData<serde_json::Value>> {
         authenticate_jwt(
@@ -1076,6 +1078,42 @@ mod test {
     }
 
     #[test]
+    fn test_authenticate_jwt_rejects_token_before_nbf() {
+        let (enc, jwk) = ed25519_fixture();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let (token, header) = sign(
+            &enc,
+            serde_json::json!({ "iss": ISS, "aud": AUD, "sub": "u", "nbf": now + 3600 }),
+        );
+        let err = verify(&jwk, &token, &header, &[]).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Failed to decode JWT Token. Failed to decode JWT token. ImmatureSignature"
+        );
+        assert_eq!(err.rejection(), None);
+    }
+
+    #[test]
+    fn test_authenticate_jwt_accepts_past_nbf_and_absent_nbf() {
+        let (enc, jwk) = ed25519_fixture();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        for claims in [
+            serde_json::json!({ "iss": ISS, "aud": AUD, "sub": "u", "nbf": now - 60 }),
+            serde_json::json!({ "iss": ISS, "aud": AUD, "sub": "u" }),
+        ] {
+            let (token, header) = sign(&enc, claims);
+            let data = verify(&jwk, &token, &header, &[]).unwrap();
+            assert_eq!(data.claims["sub"], "u");
+        }
+    }
+
+    #[test]
     fn test_authenticate_jwt_uses_token_alg_when_jwk_has_none() {
         use base64::Engine as _;
         let key_pair = aws_lc_rs::signature::Ed25519KeyPair::generate().unwrap();
@@ -1118,10 +1156,10 @@ mod test {
     // ---- scope sugar ----
 
     #[test]
-    fn test_scope_requirement_is_a_rule_with_scp_fallback() {
+    fn test_scope_rule_is_a_whitespace_all_of_with_scp_fallback() {
         assert_eq!(
-            ScopeRequirement::new("openid".to_string()),
-            ScopeRequirement::Rule(
+            ScopeRule::new("openid".to_string()).unwrap(),
+            ScopeRule(
                 ClaimRule::new(
                     SCOPE_CLAIM,
                     Some(Separator::Whitespace),
@@ -1132,19 +1170,33 @@ mod test {
                 .unwrap()
             )
         );
+    }
+
+    /// A scope that no token could ever satisfy is a configuration error, rejected at
+    /// construction like the equivalent required-claim rule.
+    #[test]
+    fn test_unsatisfiable_scopes_are_rejected_at_construction() {
         assert_eq!(
-            ScopeRequirement::new(String::new()),
-            ScopeRequirement::Unsatisfiable
+            ScopeRule::new(String::new()).unwrap_err().to_string(),
+            "Invalid scope: all_of must not contain empty strings"
         );
         assert_eq!(
-            ScopeRequirement::new("read write".to_string()),
-            ScopeRequirement::Unsatisfiable
+            ScopeRule::new("read write".to_string())
+                .unwrap_err()
+                .to_string(),
+            "Invalid scope: all_of value `read write` contains the separator"
+        );
+        assert_eq!(
+            ScopeRule::new(" admin".to_string())
+                .unwrap_err()
+                .to_string(),
+            "Invalid scope: all_of value ` admin` contains the separator"
         );
     }
 
     #[test]
-    fn test_scope_requirement_matches_previous_scope_check_cases() {
-        let scope = ScopeRequirement::new("profile".to_string());
+    fn test_scope_rule_matches_previous_scope_check_cases() {
+        let scope = ScopeRule::new("profile".to_string()).unwrap();
         let ok = |v: serde_json::Value| scope.matches(&serde_json::json!({ "scope": v }));
         assert!(ok(serde_json::json!("openid profile email")));
         assert!(ok(serde_json::json!("openid  profile\temail")));
@@ -1161,15 +1213,13 @@ mod test {
     }
 
     #[test]
-    fn test_empty_scope_rejects_every_token() {
-        let (enc, jwk) = ed25519_fixture();
-        let (token, header) = sign(
-            &enc,
-            serde_json::json!({ "iss": ISS, "aud": AUD, "sub": "u", "scope": "openid" }),
-        );
-        let scope = ScopeRequirement::new(String::new());
-        let err = verify_with_scope(&jwk, &token, &header, Some(&scope), &[]).unwrap_err();
-        assert_eq!(err.rejection(), Some(&RejectionReason::ScopeMissing));
+    fn test_scope_rule_rejects_non_string_scope_values() {
+        let scope = ScopeRule::new("42".to_string()).unwrap();
+        assert!(!scope.matches(&serde_json::json!({ "scope": 42 })));
+        assert!(scope.matches(&serde_json::json!({ "scope": ["42"] })));
+        let scope = ScopeRule::new("admin".to_string()).unwrap();
+        assert!(!scope.matches(&serde_json::json!({ "scope": ["admin", 42] })));
+        assert!(!scope.matches(&serde_json::json!({ "scope": ["admin", true] })));
     }
 
     #[test]
@@ -1179,7 +1229,7 @@ mod test {
             &enc,
             serde_json::json!({ "iss": ISS, "aud": AUD, "sub": "u", "scope": "openid" }),
         );
-        let scope = ScopeRequirement::new("admin".to_string());
+        let scope = ScopeRule::new("admin".to_string()).unwrap();
         let err =
             verify_with_scope(&jwk, &token, &header, Some(&scope), &[org_rule("x")]).unwrap_err();
         assert_eq!(err.rejection(), Some(&RejectionReason::ScopeMissing));
@@ -1188,7 +1238,7 @@ mod test {
     #[test]
     fn test_scope_and_caller_rule_failures_are_distinguishable() {
         let (enc, jwk) = ed25519_fixture();
-        let scope = ScopeRequirement::new("admin".to_string());
+        let scope = ScopeRule::new("admin".to_string()).unwrap();
         let caller = ("scope".to_string(), org_rule("tenant-a").1);
         // Scope satisfied, caller rule fails.
         let (token, header) = sign(
@@ -1285,7 +1335,7 @@ mod test {
         let clone = authenticator.clone();
         assert!(std::sync::Arc::ptr_eq(&authenticator.inner, &clone.inner));
         // Configuring a clone does not affect the original.
-        let changed = clone.set_scope("x".to_string());
+        let changed = clone.set_scope("x".to_string()).unwrap();
         assert!(authenticator.inner.scope.is_none());
         assert!(changed.inner.scope.is_some());
         server.abort();
