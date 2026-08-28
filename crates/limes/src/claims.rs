@@ -60,7 +60,7 @@ pub enum ClaimRuleError {
     InvalidClaimPath,
     #[error("{operator} must not be empty")]
     EmptyValueList { operator: &'static str },
-    #[error("{operator} must not contain empty strings")]
+    #[error("{operator} must not contain blank values")]
     EmptyValue { operator: &'static str },
     #[error("separator must not be empty")]
     EmptySeparator,
@@ -82,6 +82,47 @@ pub struct ClaimRule {
     claims: Vec<String>,
     separator: Option<Separator>,
     operator: ClaimOperator,
+    /// Derived from `operator`; present only for a deny.
+    deny: Option<DenyIndex>,
+}
+
+/// Where a banned value can start, and how long it can be there.
+///
+/// A scan position tests only the values that could begin with the byte at it, so the cost of
+/// a deny follows the length of the claim rather than the size of the deny set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DenyIndex {
+    lengths_by_first_byte: std::collections::HashMap<u8, Vec<usize>>,
+}
+
+impl DenyIndex {
+    fn new(set: &HashSet<String>) -> Self {
+        let mut lengths_by_first_byte: std::collections::HashMap<u8, Vec<usize>> =
+            std::collections::HashMap::new();
+        for value in set {
+            if let Some(&first) = value.as_bytes().first() {
+                lengths_by_first_byte
+                    .entry(first)
+                    .or_default()
+                    .push(value.len());
+            }
+        }
+        for lengths in lengths_by_first_byte.values_mut() {
+            lengths.sort_unstable();
+            lengths.dedup();
+        }
+        Self {
+            lengths_by_first_byte,
+        }
+    }
+
+    /// The lengths a banned value can have starting at `start`, empty when none can.
+    fn lengths_at(&self, item: &str, start: usize) -> &[usize] {
+        item.as_bytes()
+            .get(start)
+            .and_then(|byte| self.lengths_by_first_byte.get(byte))
+            .map_or(&[], Vec::as_slice)
+    }
 }
 
 impl ClaimRule {
@@ -171,7 +212,9 @@ impl ClaimRule {
             if values.is_empty() {
                 return Err(ClaimRuleError::EmptyValueList { operator: name });
             }
-            if values.iter().any(String::is_empty) {
+            // A blank claim carries nothing, so selection skips it. A rule that could name
+            // a blank value would have one to find there, and skipping would lose it.
+            if values.iter().any(|v| v.trim().is_empty()) {
                 return Err(ClaimRuleError::EmptyValue { operator: name });
             }
             let split_by_separator = |v: &str| match &separator {
@@ -188,10 +231,15 @@ impl ClaimRule {
                 });
             }
         }
+        let deny = match &operator {
+            ClaimOperator::NoneOf(set) => Some(DenyIndex::new(set)),
+            _ => None,
+        };
         Ok(Self {
             claims,
             separator,
             operator,
+            deny,
         })
     }
 
@@ -259,10 +307,10 @@ impl ClaimRule {
             // the claim can yield a banned value — array elements included, which a grant
             // never splits.
             ClaimOperator::NoneOf(set) => items.is_some_and(|(items, _)| {
-                let lengths = needle_lengths(set);
+                let deny = self.deny.as_ref();
                 !items
                     .iter()
-                    .any(|item| is_banned(&scalar_text(item), set, &lengths, separator))
+                    .any(|item| is_banned(&scalar_text(item), set, deny, separator))
             }),
             // Splitting is the expensive part, so a multi-value `all_of` over a split string
             // splits once instead of once per needle.
@@ -325,14 +373,6 @@ fn is_populated(value: &serde_json::Value) -> bool {
     }
 }
 
-/// The distinct byte lengths a banned value can have, shortest first.
-fn needle_lengths(set: &HashSet<String>) -> Vec<usize> {
-    let mut lengths: Vec<usize> = set.iter().map(String::len).collect();
-    lengths.sort_unstable();
-    lengths.dedup();
-    lengths
-}
-
 /// The comparable text of a scalar item.
 fn scalar_text(value: &serde_json::Value) -> Cow<'_, str> {
     match value {
@@ -350,12 +390,12 @@ fn scalar_text(value: &serde_json::Value) -> Cow<'_, str> {
 /// never produces `admin`, hiding a banned group from the deny. Scanning from every position
 /// a value could start at sees all readings, so no join can smuggle a banned value through.
 ///
-/// `lengths` are the distinct lengths of the deny set, so each position costs one lookup per
-/// length rather than one comparison per banned value.
+/// `index` narrows each position to the values that could begin there, so the scan costs a
+/// lookup per candidate length rather than a comparison per banned value.
 fn is_banned(
     item: &str,
     set: &HashSet<String>,
-    lengths: &[usize],
+    index: Option<&DenyIndex>,
     separator: Option<&Separator>,
 ) -> bool {
     if set.contains(item) {
@@ -366,8 +406,11 @@ fn is_banned(
     let Some(separator) = separator.filter(|s| contains_separator(item, s)) else {
         return false;
     };
+    let Some(index) = index else {
+        return false;
+    };
     let banned_at = |start: usize| {
-        lengths.iter().any(|&len| {
+        index.lengths_at(item, start).iter().any(|&len| {
             item.get(start..start + len).is_some_and(|value| {
                 set.contains(value) && ends_delimited(item, start + len, separator)
             })
@@ -1229,6 +1272,25 @@ mod tests {
         let claims = json!({ "a": "other", "b": ["admin"] });
         assert!(!any.matches(&claims));
         assert!(!all.matches(&claims));
+    }
+
+    /// Selection skips a blank path, so no rule may name a value that could only be found
+    /// there — otherwise a deny walks past the claim carrying its banned value.
+    #[test]
+    fn a_rule_cannot_name_a_blank_value() {
+        for blank in ["", " ", "\t", "\u{00a0}", "  \n "] {
+            for operator in [any_of(&[blank]), all_of(&[blank]), none_of(&[blank])] {
+                assert!(
+                    matches!(
+                        ClaimRule::new("c", None, operator).unwrap_err(),
+                        ClaimRuleError::EmptyValue { .. }
+                    ),
+                    "{blank:?} must not be nameable"
+                );
+            }
+        }
+        // A value merely containing whitespace is fine.
+        assert!(ClaimRule::none_of("c", ["Domain Admins"]).is_ok());
     }
 
     /// Which claim is read must not depend on how a rule is formatted.

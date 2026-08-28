@@ -1287,7 +1287,11 @@ mod test {
     fn test_unsatisfiable_scopes_are_rejected_at_construction() {
         assert_eq!(
             ScopeRule::new(String::new()).unwrap_err().to_string(),
-            "Invalid scope: all_of must not contain empty strings"
+            "Invalid scope: all_of must not contain blank values"
+        );
+        assert_eq!(
+            ScopeRule::new("   ".to_string()).unwrap_err().to_string(),
+            "Invalid scope: all_of must not contain blank values"
         );
         assert_eq!(
             ScopeRule::new("read write".to_string())
