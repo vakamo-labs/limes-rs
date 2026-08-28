@@ -115,8 +115,8 @@ impl ClaimRule {
     }
 
     /// `claim` must be populated (`true`) — present, not `null`, and carrying a non-empty
-    /// value — or absent or `null` (`false`). A claim that is present but empty satisfies
-    /// neither.
+    /// value or, for an object or an array of objects, at least one member — or absent or
+    /// `null` (`false`). A claim that is present but empty satisfies neither.
     ///
     /// # Errors
     /// See [`ClaimRuleError`].
@@ -215,10 +215,11 @@ impl ClaimRule {
     /// array of scalars is its elements, and strings are split by the separator. Objects and
     /// arrays holding non-scalars are *malformed*: they exist but carry no value.
     ///
-    /// `exists: true` holds when the claim carries at least one non-empty value, so a claim
-    /// that is present but empty — `[]`, `""`, `{}` — satisfies it no more than a missing
-    /// one. `exists: false` keeps its narrow meaning of absent or `null`, so the two are not
-    /// complements: an empty claim fails both.
+    /// `exists: true` holds when the claim is *populated*: it carries at least one non-empty
+    /// value, or — being malformed and so carrying none — holds at least one member or
+    /// element. A claim that is present but empty (`[]`, `""`, `{}`) satisfies it no more
+    /// than a missing one. `exists: false` keeps its narrow meaning of absent or `null`, so
+    /// the two are not complements: an empty claim fails both.
     #[must_use]
     pub fn matches(&self, claims: &serde_json::Value) -> bool {
         let value = self
