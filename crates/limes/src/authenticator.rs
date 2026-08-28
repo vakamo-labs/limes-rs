@@ -15,12 +15,12 @@ pub(crate) const SCOPE_CLAIM: &str = "scope";
 /// Array-shaped alternative to `scope` emitted by some IdPs; consulted when `scope` is absent.
 pub(crate) const SCP_CLAIM: &str = "scp";
 
-/// The `scope` claim, or `scp` if `scope` is absent or `null`.
+/// The `scope` claim, or `scp` if `scope` carries no scopes.
+///
+/// Resolved through [`crate::claims::resolve`], the one owner of that choice, so the scope
+/// requirement and [`Authentication::scopes`] always read the same claim.
 pub(crate) fn scope_claim(claims: &serde_json::Value) -> Option<&serde_json::Value> {
-    [SCOPE_CLAIM, SCP_CLAIM]
-        .into_iter()
-        .filter_map(|c| claims.get(c))
-        .find(|v| !v.is_null())
+    crate::claims::resolve(claims, [SCOPE_CLAIM, SCP_CLAIM])
 }
 
 pub trait Authenticator
@@ -194,6 +194,8 @@ impl Authentication {
         let (items, split) = scope_claim(&self.claims)
             .and_then(crate::claims::strings)
             .unwrap_or((&[], false));
+        // `strings` rejects non-strings, so a malformed claim yields nothing — the same
+        // reading the scope requirement enforces.
         crate::claims::ClaimValues::new(items, Some(&crate::claims::Separator::Whitespace), split)
             .filter_map(|v| match v {
                 std::borrow::Cow::Borrowed(s) => Some(s),

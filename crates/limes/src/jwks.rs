@@ -883,8 +883,12 @@ impl ScopeRule {
 
     /// Scopes are strings: a claim holding numbers or booleans is malformed and never
     /// satisfies the requirement, matching [`Authentication::scopes`].
+    ///
+    /// The guard reads the claim the rule itself resolved. Resolving it a second time would
+    /// let the guard vet one claim while the rule evaluates another.
     fn matches(&self, claims: &serde_json::Value) -> bool {
-        crate::authenticator::scope_claim(claims)
+        self.0
+            .resolve(claims)
             .and_then(crate::claims::strings)
             .is_some()
             && self.0.matches(claims)
@@ -1325,6 +1329,62 @@ mod test {
         let scope = ScopeRule::new("admin".to_string()).unwrap();
         assert!(!scope.matches(&serde_json::json!({ "scope": ["admin", 42] })));
         assert!(!scope.matches(&serde_json::json!({ "scope": ["admin", true] })));
+    }
+
+    /// The guard and the rule must read the same claim. When they resolve independently, a
+    /// `scope` that carries nothing sends the rule to `scp` while the guard still vets
+    /// `scope`, and a malformed `scp` passes unchecked.
+    #[test]
+    fn test_scope_rule_guards_the_claim_it_evaluates() {
+        let scope = ScopeRule::new("admin".to_string()).unwrap();
+        for empty in [
+            serde_json::json!(""),
+            serde_json::json!("   "),
+            serde_json::json!([]),
+            serde_json::json!([""]),
+            serde_json::json!({}),
+        ] {
+            for malformed in [
+                serde_json::json!(["admin", 42]),
+                serde_json::json!(["admin", true]),
+                serde_json::json!(["admin", null]),
+            ] {
+                let claims = serde_json::json!({ "scope": empty, "scp": malformed });
+                assert!(
+                    !scope.matches(&claims),
+                    "{claims} must not satisfy the scope"
+                );
+            }
+            // The same fallback with well-formed scopes does satisfy it.
+            let claims = serde_json::json!({ "scope": empty, "scp": ["admin"] });
+            assert!(scope.matches(&claims), "{claims} must satisfy the scope");
+        }
+    }
+
+    /// `Authentication::scopes` must report the scopes the requirement enforced against.
+    #[test]
+    fn test_reported_scopes_are_the_enforced_scopes() {
+        let scope = ScopeRule::new("admin".to_string()).unwrap();
+        for claims in [
+            serde_json::json!({ "scope": "", "scp": ["admin"] }),
+            serde_json::json!({ "scope": "   ", "scp": ["admin"] }),
+            serde_json::json!({ "scope": [], "scp": ["admin"] }),
+            serde_json::json!({ "scope": "admin", "scp": ["other"] }),
+        ] {
+            let auth = Authentication::builder()
+                .token_header(None)
+                .claims(claims.clone())
+                .name(None)
+                .email(None)
+                .subject(crate::Subject::new(None, "sub".to_string()))
+                .principal_type(None)
+                .build();
+            assert_eq!(
+                auth.scopes().any(|s| s == "admin"),
+                scope.matches(&claims),
+                "{claims}: reported scopes disagree with enforcement"
+            );
+        }
     }
 
     #[test]
