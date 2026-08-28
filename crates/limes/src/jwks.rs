@@ -193,8 +193,8 @@ impl JWKSWebAuthenticator {
     /// If `None`, the `sub` claim will be used.
     ///
     /// The claim is a path: it nests on every dot (`resource_access.account.id`), or names one
-    /// claim outright when it contains `/` or `:`. A token whose subject claim is blank is
-    /// rejected.
+    /// claim outright when it contains `/` or `:`. A token is rejected unless the claim holds
+    /// a string that is not blank — a non-string, `""` and `"   "` are all no subject.
     #[must_use]
     pub fn with_subject_claim(mut self, subject_claim: String) -> Self {
         std::sync::Arc::make_mut(&mut self.inner).subject_claim = vec![subject_claim];
@@ -203,7 +203,9 @@ impl JWKSWebAuthenticator {
 
     /// Set multiple claims to use as the subjects id.
     /// Overrides any previously set claims.
-    /// If multiple claims are set, the first one that is found in the token will be used.
+    /// If multiple claims are set, the first one holding a string that is not blank will be
+    /// used; a claim that is absent, non-string, empty or whitespace-only is passed over for
+    /// the next.
     ///
     /// If this function is called with an empty vector, the previously set claim will be used,
     /// by default this is the `sub` claim.
