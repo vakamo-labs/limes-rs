@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0](https://github.com/vakamo-labs/limes-rs/compare/v0.6.0...v0.7.0) - 2026-08-28
+
+### Fixed
+
+- *(jwks)* [**breaking**] read the subject claim as a path and reject a blank one ([#82](https://github.com/vakamo-labs/limes-rs/pull/82))
+- *(claims)* [**breaking**] close separator and exists fail-open paths ([#81](https://github.com/vakamo-labs/limes-rs/pull/81))
+
+### Other
+
+- *(docs)* Fix Changelog
+
 ## [0.6.0](https://github.com/vakamo-labs/limes-rs/compare/v0.5.0...v0.6.0) - 2026-08-27
 
 ### Added
