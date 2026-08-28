@@ -1067,9 +1067,6 @@ mod tests {
         let null_flat = json!({ "a.b": null, "a": { "b": "real" } });
         assert!(rule("a.b", ClaimOperator::Exists(true)).matches(&null_flat));
         assert!(!rule("a.b", ClaimOperator::Exists(false)).matches(&null_flat));
-
-        // Consequence: a URI-shaped claim name is not addressable; such a path is rejected
-        // at construction (see `new_rejects_uri_shaped_claim_paths`).
     }
 
     /// Pins the documented `none_of` semantics: without a separator the whole string is one
