@@ -190,10 +190,10 @@ impl Authentication {
     /// or an array holding non-strings) is malformed and yields nothing. Returns an empty
     /// iterator if neither claim is present.
     pub fn scopes(&self) -> impl Iterator<Item = &str> {
-        let items = scope_claim(&self.claims)
+        let (items, split) = scope_claim(&self.claims)
             .and_then(crate::claims::strings)
-            .unwrap_or_default();
-        crate::claims::ClaimValues::new(items, Some(&crate::claims::Separator::Whitespace))
+            .unwrap_or((&[], false));
+        crate::claims::ClaimValues::new(items, Some(&crate::claims::Separator::Whitespace), split)
             .filter_map(|v| match v {
                 std::borrow::Cow::Borrowed(s) => Some(s),
                 std::borrow::Cow::Owned(_) => None,
@@ -279,12 +279,13 @@ mod test {
         assert_eq!(auth.scopes().collect::<Vec<_>>(), ["a"]);
     }
 
+    /// The array form of `scope` states one scope per element, so elements are not split.
     #[test]
-    fn test_scopes_splits_array_elements_like_enforcement() {
+    fn test_scopes_does_not_split_array_elements() {
         let auth = auth_with_claims(serde_json::json!({ "scope": ["openid profile", "email"] }));
         assert_eq!(
             auth.scopes().collect::<Vec<_>>(),
-            ["openid", "profile", "email"]
+            ["openid profile", "email"]
         );
     }
 

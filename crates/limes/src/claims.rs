@@ -39,7 +39,10 @@ pub enum ClaimOperator {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum ClaimRuleError {
-    #[error("claim path must not be empty or contain empty segments")]
+    #[error(
+        "claim path must not be empty, contain empty segments, or contain `/` or `:` \
+         (a claim whose name contains a dot, such as a URI, is not addressable)"
+    )]
     InvalidClaimPath,
     #[error("{operator} must not be empty")]
     EmptyValueList { operator: &'static str },
@@ -196,7 +199,12 @@ impl ClaimRule {
     /// The claim is the first path that is present and not `null`; if there is none it is
     /// *missing*. A present claim is a set of values: a scalar is its canonical string, an
     /// array of scalars is its elements, and strings are split by the separator. Objects and
-    /// arrays holding non-scalars are *malformed*: they exist but match no value.
+    /// arrays holding non-scalars are *malformed*: they exist but carry no value.
+    ///
+    /// `exists: true` holds when the claim carries at least one non-empty value, so a claim
+    /// that is present but empty — `[]`, `""`, `{}` — satisfies it no more than a missing
+    /// one. `exists: false` keeps its narrow meaning of absent or `null`, so the two are not
+    /// complements: an empty claim fails both.
     #[must_use]
     pub fn matches(&self, claims: &serde_json::Value) -> bool {
         let value = self
@@ -206,16 +214,25 @@ impl ClaimRule {
             .find(|v| !v.is_null());
         let items = value.and_then(scalars);
         let separator = self.separator.as_ref();
-        let values = || items.map(|items| ClaimValues::new(items, separator));
+        let values = || items.map(|(items, split)| ClaimValues::new(items, separator, split));
         match &self.operator {
-            ClaimOperator::Exists(expected) => value.is_some() == *expected,
+            ClaimOperator::Exists(true) => values().is_some_and(|mut v| v.any(|x| !x.is_empty())),
+            ClaimOperator::Exists(false) => value.is_none(),
             ClaimOperator::AnyOf(set) => values().is_some_and(|mut v| v.any(|x| set.contains(&*x))),
             ClaimOperator::NoneOf(set) => {
                 values().is_some_and(|mut v| !v.any(|x| set.contains(&*x)))
             }
-            ClaimOperator::AllOf(set) => items.is_some_and(|items| {
+            // Splitting is the expensive part, so a multi-value `all_of` over a split string
+            // splits once instead of once per needle.
+            ClaimOperator::AllOf(set) if separator.is_some() && set.len() > 1 => values()
+                .is_some_and(|v| {
+                    let values: Vec<_> = v.collect();
+                    set.iter()
+                        .all(|needle| values.iter().any(|x| **x == **needle))
+                }),
+            ClaimOperator::AllOf(set) => items.is_some_and(|(items, split)| {
                 set.iter()
-                    .all(|needle| ClaimValues::new(items, separator).any(|x| *x == **needle))
+                    .all(|needle| ClaimValues::new(items, separator, split).any(|x| *x == **needle))
             }),
         }
     }
@@ -223,22 +240,25 @@ impl ClaimRule {
 
 /// The scalar items of a claim value: the value itself, or the elements of an array of
 /// scalars. `None` for objects and arrays holding non-scalars.
-pub(crate) fn scalars(value: &serde_json::Value) -> Option<&[serde_json::Value]> {
+///
+/// The flag reports whether the claim was a lone scalar rather than an array, which is the
+/// only case a separator may split.
+pub(crate) fn scalars(value: &serde_json::Value) -> Option<(&[serde_json::Value], bool)> {
     match value {
-        serde_json::Value::Array(items) if items.iter().all(is_scalar) => Some(items),
-        v if is_scalar(v) => Some(std::slice::from_ref(v)),
+        serde_json::Value::Array(items) if items.iter().all(is_scalar) => Some((items, false)),
+        v if is_scalar(v) => Some((std::slice::from_ref(v), true)),
         _ => None,
     }
 }
 
 /// Like [`scalars`], but only a string or an array of strings qualifies; numbers and booleans
 /// make the claim malformed. Used for scopes, which are strings by definition.
-pub(crate) fn strings(value: &serde_json::Value) -> Option<&[serde_json::Value]> {
+pub(crate) fn strings(value: &serde_json::Value) -> Option<(&[serde_json::Value], bool)> {
     match value {
         serde_json::Value::Array(items) if items.iter().all(serde_json::Value::is_string) => {
-            Some(items)
+            Some((items, false))
         }
-        serde_json::Value::String(_) => Some(std::slice::from_ref(value)),
+        serde_json::Value::String(_) => Some((std::slice::from_ref(value), true)),
         _ => None,
     }
 }
@@ -252,7 +272,10 @@ fn collect<I: IntoIterator<Item = S>, S: Into<String>>(values: I) -> HashSet<Str
 }
 
 fn validate_path(path: String) -> Result<String, ClaimRuleError> {
-    if path.is_empty() || path.split('.').any(str::is_empty) {
+    // `/` and `:` only appear in URI-shaped claim *names*, which dotted paths cannot address.
+    // Such a path resolves to nothing, which `exists: false` would read as "holds for every
+    // token" — so reject it rather than let a rule silently admit everyone.
+    if path.is_empty() || path.split('.').any(str::is_empty) || path.contains(['/', ':']) {
         return Err(ClaimRuleError::InvalidClaimPath);
     }
     Ok(path)
@@ -260,6 +283,10 @@ fn validate_path(path: String) -> Result<String, ClaimRuleError> {
 
 /// Streams the comparable values of scalar items without collecting: strings are borrowed
 /// (and split by the separator, empty pieces dropped), numbers and booleans are formatted.
+///
+/// The separator applies only when the claim is a lone string. An array already states one
+/// value per element, so splitting its elements would manufacture values the issuer never
+/// put in the token — `["x,admin"]` must not satisfy a rule for `admin`.
 pub(crate) struct ClaimValues<'a> {
     items: std::slice::Iter<'a, serde_json::Value>,
     separator: Option<&'a Separator>,
@@ -272,10 +299,15 @@ enum Pieces<'a> {
 }
 
 impl<'a> ClaimValues<'a> {
-    pub(crate) fn new(items: &'a [serde_json::Value], separator: Option<&'a Separator>) -> Self {
+    /// `separator` is applied only if `items` is a lone string claim, not array elements.
+    pub(crate) fn new(
+        items: &'a [serde_json::Value],
+        separator: Option<&'a Separator>,
+        split: bool,
+    ) -> Self {
         Self {
             items: items.iter(),
-            separator,
+            separator: if split { separator } else { None },
             pending: None,
         }
     }
@@ -415,6 +447,28 @@ mod tests {
         );
     }
 
+    /// An unresolvable path makes `exists: false` hold for every token, so paths that can
+    /// only ever be claim *names* — not addressable as dotted paths — are rejected up front.
+    #[test]
+    fn new_rejects_uri_shaped_claim_paths() {
+        for path in [
+            "https://example.com/roles",
+            "kubernetes.io/serviceaccount/namespace",
+            "http://schemas.microsoft.com/identity/claims/objectidentifier",
+        ] {
+            assert_eq!(
+                ClaimRule::new(path, None, any_of(&["a"])).unwrap_err(),
+                ClaimRuleError::InvalidClaimPath,
+                "path {path:?}"
+            );
+            assert_eq!(
+                ClaimRule::new(path, None, ClaimOperator::Exists(false)).unwrap_err(),
+                ClaimRuleError::InvalidClaimPath,
+                "path {path:?}"
+            );
+        }
+    }
+
     #[test]
     fn new_rejects_empty_path_segments() {
         for path in ["a..b", ".a", "a.", "."] {
@@ -540,7 +594,7 @@ mod tests {
         assert!(!r(all_of(&["a"])).matches(&claims));
         // Like an empty array: present, nothing to deny.
         assert!(r(none_of(&["a"])).matches(&claims));
-        assert!(r(ClaimOperator::Exists(true)).matches(&claims));
+        assert!(!r(ClaimOperator::Exists(true)).matches(&claims));
     }
 
     #[test]
@@ -554,28 +608,56 @@ mod tests {
         assert!(!rule("c", none_of(&["a"])).matches(&claims));
     }
 
+    /// `exists: true` asks whether the claim carries a value, so the wire form of
+    /// "belongs to nothing" — an empty array or an empty string — does not satisfy it.
+    /// `exists: false` keeps its narrow meaning (absent or `null`), so the two are not
+    /// complements: both reject a claim that is present but carries nothing.
     #[test]
-    fn empty_array_matches_nothing_but_exists() {
+    fn empty_array_matches_no_operator() {
         let claims = claims_with(&json!([]));
         assert!(!rule("c", any_of(&["a"])).matches(&claims));
         assert!(!rule("c", all_of(&["a"])).matches(&claims));
         assert!(rule("c", none_of(&["a"])).matches(&claims));
-        assert!(rule("c", ClaimOperator::Exists(true)).matches(&claims));
+        assert!(!rule("c", ClaimOperator::Exists(true)).matches(&claims));
         assert!(!rule("c", ClaimOperator::Exists(false)).matches(&claims));
     }
 
     #[test]
-    fn object_claim_fails_every_operator_except_exists_true() {
+    fn exists_true_requires_a_non_empty_value() {
+        for empty in [json!([]), json!(""), json!({}), json!(["", ""])] {
+            let claims = claims_with(&empty);
+            assert!(
+                !rule("c", ClaimOperator::Exists(true)).matches(&claims),
+                "{empty} must not satisfy exists=true"
+            );
+            assert!(
+                !rule("c", ClaimOperator::Exists(false)).matches(&claims),
+                "{empty} is present, so exists=false must not hold either"
+            );
+        }
+        for present in [json!("a"), json!(0), json!(false), json!(["a"])] {
+            let claims = claims_with(&present);
+            assert!(
+                rule("c", ClaimOperator::Exists(true)).matches(&claims),
+                "{present} must satisfy exists=true"
+            );
+        }
+    }
+
+    /// An object carries no comparable value, so it satisfies no operator — including
+    /// `exists`, which would otherwise report a claim no rule can act on as usable.
+    #[test]
+    fn object_claim_fails_every_operator() {
         let claims = claims_with(&json!({"a": "b"}));
         assert!(!rule("c", any_of(&["a"])).matches(&claims));
         assert!(!rule("c", all_of(&["a"])).matches(&claims));
         assert!(!rule("c", none_of(&["zzz"])).matches(&claims));
-        assert!(rule("c", ClaimOperator::Exists(true)).matches(&claims));
+        assert!(!rule("c", ClaimOperator::Exists(true)).matches(&claims));
         assert!(!rule("c", ClaimOperator::Exists(false)).matches(&claims));
     }
 
     #[test]
-    fn array_with_non_scalar_element_fails_every_operator_except_exists_true() {
+    fn array_with_non_scalar_element_fails_every_operator() {
         for value in [
             json!(["a", ["b"]]),
             json!(["a", {"k": "v"}]),
@@ -583,8 +665,10 @@ mod tests {
         ] {
             let claims = claims_with(&value);
             assert!(!rule("c", any_of(&["a"])).matches(&claims));
+            assert!(!rule("c", all_of(&["a"])).matches(&claims));
             assert!(!rule("c", none_of(&["zzz"])).matches(&claims));
-            assert!(rule("c", ClaimOperator::Exists(true)).matches(&claims));
+            assert!(!rule("c", ClaimOperator::Exists(true)).matches(&claims));
+            assert!(!rule("c", ClaimOperator::Exists(false)).matches(&claims));
         }
     }
 
@@ -608,9 +692,9 @@ mod tests {
     }
 
     #[test]
-    fn empty_string_claim_exists() {
+    fn empty_string_claim_carries_no_value() {
         let claims = claims_with(&json!(""));
-        assert!(rule("c", ClaimOperator::Exists(true)).matches(&claims));
+        assert!(!rule("c", ClaimOperator::Exists(true)).matches(&claims));
         assert!(!rule("c", any_of(&["a"])).matches(&claims));
     }
 
@@ -659,15 +743,28 @@ mod tests {
         assert!(r.matches(&claims));
     }
 
+    /// An array states one value per element. Splitting elements would manufacture values
+    /// the issuer never put in the token, so a rule for `admin` must not match
+    /// `["x,admin"]`.
     #[test]
-    fn separator_applies_to_each_string_array_element() {
+    fn separator_does_not_split_array_elements() {
         let claims = claims_with(&json!(["openid email", "profile"]));
         let r = rule_sep(
             "c",
             Separator::Whitespace,
             all_of(&["openid", "email", "profile"]),
         );
-        assert!(r.matches(&claims));
+        assert!(!r.matches(&claims));
+        // Unsplit, each element is one value — matched by a rule without a separator.
+        assert!(rule("c", all_of(&["openid email", "profile"])).matches(&claims));
+
+        let smuggled = claims_with(&json!(["x,platform-admins"]));
+        let r = rule_sep(
+            "c",
+            Separator::Literal(",".into()),
+            any_of(&["platform-admins"]),
+        );
+        assert!(!r.matches(&smuggled));
     }
 
     #[test]
@@ -702,14 +799,12 @@ mod tests {
         assert!(!rule("realm_access.roles", none_of(&["banned"])).matches(&attack));
 
         // A `null` flat key cannot hide the nested claim from `exists`.
-        let null_flat = json!({ "a.b": null, "a": { "b": "real" } });
+        let null_flat = json!({ "a": { "b": "real" } });
         assert!(rule("a.b", ClaimOperator::Exists(true)).matches(&null_flat));
         assert!(!rule("a.b", ClaimOperator::Exists(false)).matches(&null_flat));
 
-        // Consequence: a URI-shaped claim name is not addressable.
-        let uri = json!({ "https://example.com/roles": ["admin"] });
-        assert!(!rule("https://example.com/roles", any_of(&["admin"])).matches(&uri));
-        assert!(!rule("https://example.com/roles", ClaimOperator::Exists(true)).matches(&uri));
+        // Consequence: a URI-shaped claim name is not addressable; such a path is rejected
+        // at construction (see `new_rejects_uri_shaped_claim_paths`).
     }
 
     /// Pins the documented `none_of` semantics: without a separator the whole string is one
@@ -758,6 +853,18 @@ mod tests {
             .unwrap();
         assert!(r.matches(&json!({})));
         assert!(!r.matches(&json!({ "scp": "x" })));
+    }
+
+    /// A multi-value `all_of` takes the split-once path; it must agree with the general one.
+    #[test]
+    fn all_of_over_a_split_string_matches_every_value() {
+        let claims = claims_with(&json!("a b c"));
+        let r = |v: &[&str]| rule_sep("c", Separator::Whitespace, all_of(v));
+        assert!(r(&["a", "b"]).matches(&claims));
+        assert!(r(&["a", "b", "c"]).matches(&claims));
+        assert!(!r(&["a", "z"]).matches(&claims));
+        assert!(!r(&["a", "b", "c", "d"]).matches(&claims));
+        assert!(r(&["a"]).matches(&claims));
     }
 
     #[test]
