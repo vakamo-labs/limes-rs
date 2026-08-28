@@ -191,6 +191,10 @@ impl JWKSWebAuthenticator {
 
     /// Set the claim to use as the subjects id.
     /// If `None`, the `sub` claim will be used.
+    ///
+    /// The claim is a path: it nests on every dot (`resource_access.account.id`), or names one
+    /// claim outright when it contains `/` or `:`. A token whose subject claim is blank is
+    /// rejected.
     #[must_use]
     pub fn with_subject_claim(mut self, subject_claim: String) -> Self {
         std::sync::Arc::make_mut(&mut self.inner).subject_claim = vec![subject_claim];
@@ -203,6 +207,8 @@ impl JWKSWebAuthenticator {
     ///
     /// If this function is called with an empty vector, the previously set claim will be used,
     /// by default this is the `sub` claim.
+    ///
+    /// Each claim is a path, read the same way as [`Self::with_subject_claim`].
     #[must_use]
     pub fn with_subject_claims(mut self, subject_claims: Vec<String>) -> Self {
         // Setting multiple claims can be useful in multi-tenant applications.
@@ -633,7 +639,14 @@ fn get_subject(
     subject_claim: &[String],
 ) -> Result<String> {
     for claim in subject_claim {
-        if let Some(subject) = token_data.claims.get(claim).and_then(value_as_string) {
+        // The same path grammar every claim path uses, so one configured string means one
+        // thing across the subject, the roles and the rules.
+        let subject = navigate(&token_data.claims, claim)
+            .and_then(value_as_string)
+            // A blank subject is not an identity: it would collapse every token carrying one
+            // onto a single principal.
+            .filter(|subject| !subject.trim().is_empty());
+        if let Some(subject) = subject {
             return Ok(subject);
         }
     }
@@ -1338,6 +1351,69 @@ mod test {
     /// The guard and the rule must read the same claim. When they resolve independently, a
     /// `scope` that carries nothing sends the rule to `scp` while the guard still vets
     /// `scope`, and a malformed `scp` passes unchecked.
+    /// The subject reads the same path grammar as the roles claim and every rule, so one
+    /// configured string means one thing across all three.
+    #[test]
+    fn test_subject_claim_is_a_path() {
+        let claims = serde_json::json!({
+            "resource_access": { "account": { "id": "nested-id" } },
+            "https://example.com/uid": "uri-id",
+            "sub": "flat-id",
+        });
+        let subject = |paths: &[&str]| {
+            get_subject(
+                &jsonwebtoken::TokenData {
+                    header: Header::new(Algorithm::EdDSA),
+                    claims: claims.clone(),
+                },
+                &paths.iter().map(|p| (*p).to_string()).collect::<Vec<_>>(),
+            )
+        };
+        assert_eq!(
+            subject(&["resource_access.account.id"]).unwrap(),
+            "nested-id"
+        );
+        // A path containing `/` or `:` names one claim outright.
+        assert_eq!(subject(&["https://example.com/uid"]).unwrap(), "uri-id");
+        assert_eq!(subject(&["sub"]).unwrap(), "flat-id");
+        // The first path that resolves decides; unresolvable ones fall through.
+        assert_eq!(
+            subject(&["resource_access.missing", "sub"]).unwrap(),
+            "flat-id"
+        );
+        assert_eq!(
+            subject(&["missing"]).unwrap_err().rejection(),
+            Some(&RejectionReason::SubjectClaimMissing)
+        );
+    }
+
+    /// A blank subject is not an identity: every token carrying one would share a principal.
+    #[test]
+    fn test_blank_subject_is_rejected() {
+        for blank in [
+            serde_json::json!(""),
+            serde_json::json!("   "),
+            serde_json::json!("\t"),
+        ] {
+            let token_data = jsonwebtoken::TokenData {
+                header: Header::new(Algorithm::EdDSA),
+                claims: serde_json::json!({ "sub": blank, "oid": "real" }),
+            };
+            assert_eq!(
+                get_subject(&token_data, &["sub".to_string()])
+                    .unwrap_err()
+                    .rejection(),
+                Some(&RejectionReason::SubjectClaimMissing),
+                "{blank} must not be a subject"
+            );
+            // A blank claim falls through to the next path.
+            assert_eq!(
+                get_subject(&token_data, &["sub".to_string(), "oid".to_string()]).unwrap(),
+                "real"
+            );
+        }
+    }
+
     #[test]
     fn test_scope_rule_guards_the_claim_it_evaluates() {
         let scope = ScopeRule::new("admin".to_string()).unwrap();
