@@ -423,9 +423,9 @@ fn is_banned(
                 .filter(|(_, c)| c.is_whitespace())
                 .any(|(i, c)| banned_at(i + c.len_utf8())),
             // Overlapping occurrences count: `":::"` starts a value at two offsets.
-            Separator::Literal(sep) => (0..item.len())
-                .filter(|&i| item.is_char_boundary(i) && item[i..].starts_with(sep.as_str()))
-                .any(|i| banned_at(i + sep.len())),
+            Separator::Literal(literal) => (0..item.len())
+                .filter(|&i| item.is_char_boundary(i) && item[i..].starts_with(literal.as_str()))
+                .any(|i| banned_at(i + literal.len())),
         }
 }
 
