@@ -185,10 +185,10 @@ impl Authentication {
 
     /// Get the scopes of the token from the `scope` claim, or `scp` if `scope` is absent.
     ///
-    /// Values are read exactly as scope enforcement reads them: a whitespace-delimited string
-    /// or an array of strings, each split on whitespace. Anything else (an object, a number,
-    /// or an array holding non-strings) is malformed and yields nothing. Returns an empty
-    /// iterator if neither claim is present.
+    /// Values are read exactly as scope enforcement reads them: a whitespace-delimited
+    /// string, or an array of strings stating one scope per element. Anything else (an
+    /// object, a number, or an array holding non-strings) is malformed and yields nothing.
+    /// Returns an empty iterator if neither claim is present.
     pub fn scopes(&self) -> impl Iterator<Item = &str> {
         let (items, split) = scope_claim(&self.claims)
             .and_then(crate::claims::strings)

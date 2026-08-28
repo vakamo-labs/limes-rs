@@ -6,7 +6,9 @@
 
 use std::{borrow::Cow, collections::HashSet};
 
-/// How a string claim is split into values before set operators are applied.
+/// How a lone string claim is split into values before set operators are applied. Array
+/// elements are not split by `any_of`/`all_of`/`exists`; `none_of` additionally considers the
+/// split reading so that a deny cannot be evaded by embedding a banned value in an element.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Separator {
@@ -30,8 +32,17 @@ pub enum ClaimOperator {
     /// `none_of ["admin"]` does NOT fire on `"scope": "openid admin"` — that claim's single
     /// value is `"openid admin"`. Configure the separator that matches the claim's format
     /// when denying values inside delimited strings.
+    ///
+    /// With a separator, a deny fires if *any* reading of the claim yields a banned value:
+    /// the values as written and the pieces they split into, array elements included. A grant
+    /// never splits array elements, so the two directions are deliberately asymmetric — each
+    /// errs towards refusing access.
     NoneOf(HashSet<String>),
-    /// `true`: the claim is present and not `null`; `false`: absent or `null`.
+    /// `true`: the claim is populated — present, not `null`, and carrying at least one
+    /// non-empty value or, for an object, at least one member. `false`: absent or `null`.
+    ///
+    /// These are not opposites: a claim that is present but empty (`[]`, `""`, `{}`)
+    /// satisfies neither.
     Exists(bool),
 }
 
@@ -39,10 +50,7 @@ pub enum ClaimOperator {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum ClaimRuleError {
-    #[error(
-        "claim path must not be empty, contain empty segments, or contain `/` or `:` \
-         (a claim whose name contains a dot, such as a URI, is not addressable)"
-    )]
+    #[error("claim path must not be empty or contain empty segments")]
     InvalidClaimPath,
     #[error("{operator} must not be empty")]
     EmptyValueList { operator: &'static str },
@@ -70,9 +78,10 @@ pub struct ClaimRule {
 impl ClaimRule {
     /// At least one of `values` must be a value of `claim`.
     ///
-    /// `claim` is a claim name or a dotted path such as `realm_access.roles`. Every dot
-    /// nests: a claim whose name itself contains a dot (e.g. the URI-shaped
-    /// `https://example.com/roles`) is not addressable. The same applies to all constructors.
+    /// `claim` is a dotted path such as `realm_access.roles`, which nests on every dot, or —
+    /// when it contains `/` or `:` — the whole name of one claim, as identity providers use
+    /// for namespaced custom claims (`https://example.com/roles`). The same applies to all
+    /// constructors.
     ///
     /// # Errors
     /// See [`ClaimRuleError`].
@@ -105,7 +114,9 @@ impl ClaimRule {
         Self::new(claim, None, ClaimOperator::NoneOf(collect(values)))
     }
 
-    /// `claim` must be present and not `null` (`true`), or absent or `null` (`false`).
+    /// `claim` must be populated (`true`) — present, not `null`, and carrying a non-empty
+    /// value — or absent or `null` (`false`). A claim that is present but empty satisfies
+    /// neither.
     ///
     /// # Errors
     /// See [`ClaimRuleError`].
@@ -113,7 +124,9 @@ impl ClaimRule {
         Self::new(claim, None, ClaimOperator::Exists(expected))
     }
 
-    /// Split string claim values on `separator` before matching.
+    /// Split a lone string claim on `separator` before matching. Array elements are not
+    /// split by a grant, since an array already states one value per element; `none_of` also
+    /// denies on the split reading so a deny cannot be evaded.
     ///
     /// # Errors
     /// [`ClaimRuleError::EmptySeparator`], or [`ClaimRuleError::ValueContainsSeparator`] if a
@@ -176,7 +189,8 @@ impl ClaimRule {
     /// appears only in a fallback path is not seen when the primary path is present.
     ///
     /// # Errors
-    /// [`ClaimRuleError::InvalidClaimPath`] if the path is empty or has empty segments.
+    /// [`ClaimRuleError::InvalidClaimPath`] if the path is empty, or nests on a dot with an
+    /// empty segment.
     pub fn or_claim(mut self, claim: impl Into<String>) -> Result<Self, ClaimRuleError> {
         self.claims.push(validate_path(claim.into())?);
         Ok(self)
@@ -216,12 +230,25 @@ impl ClaimRule {
         let separator = self.separator.as_ref();
         let values = || items.map(|(items, split)| ClaimValues::new(items, separator, split));
         match &self.operator {
-            ClaimOperator::Exists(true) => values().is_some_and(|mut v| v.any(|x| !x.is_empty())),
+            ClaimOperator::Exists(true) => match value {
+                None => false,
+                // An object or an array of objects carries no comparable value, but it is
+                // still content: `exists` asks whether the claim is populated.
+                Some(serde_json::Value::Object(map)) => !map.is_empty(),
+                Some(serde_json::Value::Array(arr)) if items.is_none() => !arr.is_empty(),
+                Some(_) => values().is_some_and(|mut v| v.any(|x| !x.is_empty())),
+            },
             ClaimOperator::Exists(false) => value.is_none(),
             ClaimOperator::AnyOf(set) => values().is_some_and(|mut v| v.any(|x| set.contains(&*x))),
-            ClaimOperator::NoneOf(set) => {
-                values().is_some_and(|mut v| !v.any(|x| set.contains(&*x)))
-            }
+            // A deny holds only if no reading of the claim yields a banned value: both the
+            // values as the issuer wrote them and, when a separator is configured, the pieces
+            // it splits into — including inside array elements, which a grant never splits.
+            ClaimOperator::NoneOf(set) => items.is_some_and(|(items, _)| {
+                let banned = |separator, split| {
+                    ClaimValues::new(items, separator, split).any(|x| set.contains(&*x))
+                };
+                !(banned(None, false) || (separator.is_some() && banned(separator, true)))
+            }),
             // Splitting is the expensive part, so a multi-value `all_of` over a split string
             // splits once instead of once per needle.
             ClaimOperator::AllOf(set) if separator.is_some() && set.len() > 1 => values()
@@ -272,13 +299,19 @@ fn collect<I: IntoIterator<Item = S>, S: Into<String>>(values: I) -> HashSet<Str
 }
 
 fn validate_path(path: String) -> Result<String, ClaimRuleError> {
-    // `/` and `:` only appear in URI-shaped claim *names*, which dotted paths cannot address.
-    // Such a path resolves to nothing, which `exists: false` would read as "holds for every
-    // token" — so reject it rather than let a rule silently admit everyone.
-    if path.is_empty() || path.split('.').any(str::is_empty) || path.contains(['/', ':']) {
+    if path.is_empty() || (!is_claim_name(&path) && path.split('.').any(str::is_empty)) {
         return Err(ClaimRuleError::InvalidClaimPath);
     }
     Ok(path)
+}
+
+/// Whether a path names one claim outright rather than describing a nesting.
+///
+/// Identity providers namespace custom claims as URIs (`https://example.com/roles`,
+/// `kubernetes.io/serviceaccount/namespace`). A nesting never contains `/` or `:`, so those
+/// characters distinguish the two without ambiguity.
+fn is_claim_name(path: &str) -> bool {
+    path.contains(['/', ':'])
 }
 
 /// Streams the comparable values of scalar items without collecting: strings are borrowed
@@ -343,16 +376,21 @@ impl<'a> Iterator for ClaimValues<'a> {
     }
 }
 
-/// Navigate nested claims using dot-notation (e.g. `resource_access.account.roles`).
-/// Every dot nests — a claim whose *name* contains a dot (e.g. the URI-shaped
-/// `https://example.com/roles`) is not addressable, so a flat key can never shadow the
-/// nested claim a rule targets. Returns `None` if the path is absent.
+/// Resolve a claim path.
+///
+/// A path containing `/` or `:` names a single claim and is looked up whole — that is how
+/// identity providers namespace custom claims (`https://example.com/roles`). Any other path
+/// nests on every dot, so a flat claim spelled like a nesting can never shadow the nested
+/// claim a rule targets. Returns `None` if the path is absent.
 pub(crate) fn navigate<'a>(
     claims: &'a serde_json::Value,
-    dot_path: &str,
+    path: &str,
 ) -> Option<&'a serde_json::Value> {
+    if is_claim_name(path) {
+        return claims.get(path);
+    }
     let mut current = claims;
-    for part in dot_path.split('.') {
+    for part in path.split('.') {
         current = current.get(part)?;
     }
     Some(current)
@@ -447,26 +485,41 @@ mod tests {
         );
     }
 
-    /// An unresolvable path makes `exists: false` hold for every token, so paths that can
-    /// only ever be claim *names* — not addressable as dotted paths — are rejected up front.
+    /// Identity providers namespace custom claims as URIs. Such a name is looked up whole,
+    /// so the rule works and `exists: false` cannot be satisfied by a path that could never
+    /// resolve.
     #[test]
-    fn new_rejects_uri_shaped_claim_paths() {
-        for path in [
-            "https://example.com/roles",
-            "kubernetes.io/serviceaccount/namespace",
-            "http://schemas.microsoft.com/identity/claims/objectidentifier",
-        ] {
-            assert_eq!(
-                ClaimRule::new(path, None, any_of(&["a"])).unwrap_err(),
-                ClaimRuleError::InvalidClaimPath,
-                "path {path:?}"
-            );
-            assert_eq!(
-                ClaimRule::new(path, None, ClaimOperator::Exists(false)).unwrap_err(),
-                ClaimRuleError::InvalidClaimPath,
-                "path {path:?}"
-            );
-        }
+    fn uri_shaped_claim_names_are_looked_up_whole() {
+        let claims = json!({
+            "https://myapp.example.com/org": ["tenant-a"],
+            "kubernetes.io/serviceaccount/namespace": "prod",
+        });
+        assert!(
+            ClaimRule::any_of("https://myapp.example.com/org", ["tenant-a"])
+                .unwrap()
+                .matches(&claims)
+        );
+        assert!(
+            ClaimRule::any_of("kubernetes.io/serviceaccount/namespace", ["prod"])
+                .unwrap()
+                .matches(&claims)
+        );
+        assert!(
+            ClaimRule::exists("https://myapp.example.com/org", true)
+                .unwrap()
+                .matches(&claims)
+        );
+        assert!(
+            !ClaimRule::exists("https://myapp.example.com/org", false)
+                .unwrap()
+                .matches(&claims)
+        );
+        // Empty segments are only meaningful for a nesting, so a URI keeps its `//`.
+        assert!(
+            ClaimRule::exists("https://other.example.com/x", false)
+                .unwrap()
+                .matches(&claims)
+        );
     }
 
     #[test]
@@ -644,20 +697,38 @@ mod tests {
         }
     }
 
-    /// An object carries no comparable value, so it satisfies no operator — including
-    /// `exists`, which would otherwise report a claim no rule can act on as usable.
+    /// An object carries no comparable value, so no set operator can hold. `exists` asks a
+    /// different question — whether the claim is populated — and a populated object is.
     #[test]
-    fn object_claim_fails_every_operator() {
+    fn object_claim_matches_no_set_operator_but_is_populated() {
         let claims = claims_with(&json!({"a": "b"}));
         assert!(!rule("c", any_of(&["a"])).matches(&claims));
         assert!(!rule("c", all_of(&["a"])).matches(&claims));
         assert!(!rule("c", none_of(&["zzz"])).matches(&claims));
-        assert!(!rule("c", ClaimOperator::Exists(true)).matches(&claims));
+        assert!(rule("c", ClaimOperator::Exists(true)).matches(&claims));
         assert!(!rule("c", ClaimOperator::Exists(false)).matches(&claims));
+
+        // A Keycloak-shaped nested claim is reachable both ways.
+        let keycloak = json!({ "realm_access": { "roles": ["admin"] } });
+        assert!(
+            ClaimRule::exists("realm_access", true)
+                .unwrap()
+                .matches(&keycloak)
+        );
+        assert!(
+            ClaimRule::any_of("realm_access.roles", ["admin"])
+                .unwrap()
+                .matches(&keycloak)
+        );
+
+        // An empty object is present but not populated.
+        let empty = claims_with(&json!({}));
+        assert!(!rule("c", ClaimOperator::Exists(true)).matches(&empty));
+        assert!(!rule("c", ClaimOperator::Exists(false)).matches(&empty));
     }
 
     #[test]
-    fn array_with_non_scalar_element_fails_every_operator() {
+    fn array_with_non_scalar_element_matches_no_set_operator() {
         for value in [
             json!(["a", ["b"]]),
             json!(["a", {"k": "v"}]),
@@ -667,7 +738,8 @@ mod tests {
             assert!(!rule("c", any_of(&["a"])).matches(&claims));
             assert!(!rule("c", all_of(&["a"])).matches(&claims));
             assert!(!rule("c", none_of(&["zzz"])).matches(&claims));
-            assert!(!rule("c", ClaimOperator::Exists(true)).matches(&claims));
+            // Not comparable, but populated.
+            assert!(rule("c", ClaimOperator::Exists(true)).matches(&claims));
             assert!(!rule("c", ClaimOperator::Exists(false)).matches(&claims));
         }
     }
@@ -798,8 +870,8 @@ mod tests {
         });
         assert!(!rule("realm_access.roles", none_of(&["banned"])).matches(&attack));
 
-        // A `null` flat key cannot hide the nested claim from `exists`.
-        let null_flat = json!({ "a": { "b": "real" } });
+        // A flat key spelled like the nesting, even a `null` one, cannot hide it.
+        let null_flat = json!({ "a.b": null, "a": { "b": "real" } });
         assert!(rule("a.b", ClaimOperator::Exists(true)).matches(&null_flat));
         assert!(!rule("a.b", ClaimOperator::Exists(false)).matches(&null_flat));
 
@@ -865,6 +937,25 @@ mod tests {
         assert!(!r(&["a", "z"]).matches(&claims));
         assert!(!r(&["a", "b", "c", "d"]).matches(&claims));
         assert!(r(&["a"]).matches(&claims));
+    }
+
+    /// A deny must not be evadable by embedding the banned value in an array element, even
+    /// though a grant deliberately refuses to split those elements.
+    #[test]
+    fn none_of_denies_a_banned_value_inside_an_array_element() {
+        let smuggled = claims_with(&json!(["x,admin"]));
+        let deny = rule_sep("c", Separator::Literal(",".into()), none_of(&["admin"]));
+        assert!(!deny.matches(&smuggled));
+        // The same claim as a lone string is denied too.
+        assert!(!deny.matches(&claims_with(&json!("x,admin"))));
+        // ...while the grant direction still refuses to manufacture the value.
+        let grant = rule_sep("c", Separator::Literal(",".into()), any_of(&["admin"]));
+        assert!(!grant.matches(&smuggled));
+
+        // Values the issuer wrote are denied regardless of the separator.
+        assert!(!deny.matches(&claims_with(&json!(["admin"]))));
+        // An unrelated claim still passes the deny.
+        assert!(deny.matches(&claims_with(&json!(["users"]))));
     }
 
     #[test]
