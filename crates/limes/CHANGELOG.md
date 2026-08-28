@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0](https://github.com/vakamo-labs/limes-rs/compare/v0.5.0...v0.6.0) - 2026-08-27
+
+### Added
+
+- *(claims)* `ClaimRule` states a requirement on one claim — `any_of`, `all_of`, `none_of` or `exists` over a claim name or dotted path, with an optional whitespace or literal separator for delimited strings. Rules are validated when built: `ClaimRule::{any_of, all_of, none_of, exists}` and `with_separator` reject an empty path or value list, an empty separator, and a value the separator would split ([#79](https://github.com/vakamo-labs/limes-rs/pull/79))
+- *(jwks)* `JWKSWebAuthenticator::with_required_claims` evaluates rules in order after the signature, issuer, audience and scope checks. Every rule must hold, and missing, `null` and non-scalar claims fail closed ([#79](https://github.com/vakamo-labs/limes-rs/pull/79))
+- *(error)* `Error::TokenRejected { rejection: RejectionReason }` marks a token whose signature verified and whose claims did not: audience, issuer, scope, a named required-claim rule, or the subject claim. It carries names only, never claim values, so it is safe to log and audit ([#79](https://github.com/vakamo-labs/limes-rs/pull/79))
+- *(jwks)* `set_scope` reads the scope from the `scope` claim, or `scp` if `scope` is absent, as a whitespace-delimited string or an array of strings. `Authentication::scopes()` reads the claim the same way ([#79](https://github.com/vakamo-labs/limes-rs/pull/79))
+
+### Fixed
+
+- *(jwks)* a token whose `nbf` lies in the future is rejected ([#79](https://github.com/vakamo-labs/limes-rs/pull/79))
+- *(jwks)* with audiences configured, a token without an `aud` claim is rejected ([#79](https://github.com/vakamo-labs/limes-rs/pull/79))
+- *(jwks)* a key id absent from the JWKS is an authentication failure of that token, and the key id stays out of the error ([#79](https://github.com/vakamo-labs/limes-rs/pull/79))
+
+### Performance
+
+- *(jwks)* `JWKSWebAuthenticator` shares its configuration behind an `Arc`, so cloning it per request is a refcount bump. Claim matching borrows from the decoded claims without allocating ([#79](https://github.com/vakamo-labs/limes-rs/pull/79))
+
+### Breaking
+
+- *(jwks)* `set_scope` returns `Result` and rejects a scope that is empty or contains whitespace ([#79](https://github.com/vakamo-labs/limes-rs/pull/79))
+- *(error)* `Error` is `#[non_exhaustive]`. `Error::AudienceMismatch` and `Error::IssuerMismatch` are removed: audience and issuer failures are `Error::TokenRejected`, and the Kubernetes issuer pre-check — which runs before the token is verified — is `Error::Unauthenticated` ([#79](https://github.com/vakamo-labs/limes-rs/pull/79))
+- *(jwks)* a missing subject claim is `Error::TokenRejected` ([#79](https://github.com/vakamo-labs/limes-rs/pull/79))
+- *(jwks)* with audiences configured, a token without an `aud` claim, and any token whose `nbf` lies in the future, are rejected. Deployments whose identity provider omits `aud`, or whose clocks drift beyond the 60 second leeway, are affected ([#79](https://github.com/vakamo-labs/limes-rs/pull/79))
+
 ## [0.5.0](https://github.com/vakamo-labs/limes-rs/compare/v0.4.2...v0.5.0) - 2026-08-08
 
 ### Added
