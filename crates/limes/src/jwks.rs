@@ -117,6 +117,24 @@ impl JWKSWebAuthenticator {
         self
     }
 
+    /// The issuers this authenticator accepts: the one discovered from the provider's
+    /// `.well-known` document, followed by any added with
+    /// [`add_additional_issuers`](Self::add_additional_issuers).
+    ///
+    /// This is what [`can_handle_token`](Authenticator::can_handle_token) routes on, so a
+    /// caller assembling several authenticators can check here whether two of them would
+    /// compete for the same tokens.
+    #[must_use]
+    pub fn issuers(&self) -> &[String] {
+        &self.inner.issuers
+    }
+
+    /// The audiences this authenticator accepts; empty means any.
+    #[must_use]
+    pub fn audiences(&self) -> &[String] {
+        &self.inner.audiences
+    }
+
     /// Set the accepted audiences.
     /// If empty / not called, no audience validation is done.
     #[must_use]
@@ -447,13 +465,21 @@ fn authenticate_jwt(
             tracing::debug!(accepted_issuers = ?issuers, "Token issuer rejected: {e}");
             Error::rejected(RejectionReason::IssuerMismatch)
         }
-        jsonwebtoken::errors::ErrorKind::MissingRequiredClaim(claim) if claim == "aud" => {
-            tracing::debug!(accepted_audiences = ?audiences, "Token audience rejected: {e}");
-            Error::rejected(RejectionReason::AudienceMismatch)
+        jsonwebtoken::errors::ErrorKind::MissingRequiredClaim(claim) => {
+            Error::rejected(RejectionReason::ClaimMissing {
+                claim: claim.clone(),
+            })
         }
-        jsonwebtoken::errors::ErrorKind::MissingRequiredClaim(claim) if claim == "iss" => {
-            tracing::debug!(accepted_issuers = ?issuers, "Token issuer rejected: {e}");
-            Error::rejected(RejectionReason::IssuerMismatch)
+        jsonwebtoken::errors::ErrorKind::ExpiredSignature => {
+            Error::rejected(RejectionReason::Expired)
+        }
+        jsonwebtoken::errors::ErrorKind::ImmatureSignature => {
+            Error::rejected(RejectionReason::NotYetValid)
+        }
+        jsonwebtoken::errors::ErrorKind::InvalidClaimFormat(claim) => {
+            Error::rejected(RejectionReason::ClaimMalformed {
+                claim: claim.clone(),
+            })
         }
         _ => Error::JWTDecodeError {
             reason: format!("Failed to decode JWT token. {e}"),
@@ -857,8 +883,12 @@ impl ScopeRule {
 
     /// Scopes are strings: a claim holding numbers or booleans is malformed and never
     /// satisfies the requirement, matching [`Authentication::scopes`].
+    ///
+    /// The guard reads the claim the rule itself resolved. Resolving it a second time would
+    /// let the guard vet one claim while the rule evaluates another.
     fn matches(&self, claims: &serde_json::Value) -> bool {
-        crate::authenticator::scope_claim(claims)
+        self.0
+            .resolve(claims)
             .and_then(crate::claims::strings)
             .is_some()
             && self.0.matches(claims)
@@ -897,6 +927,16 @@ mod test {
         let mut header = Header::new(Algorithm::EdDSA);
         header.kid = Some("k1".to_string());
         let token = jsonwebtoken::encode(&header, &claims, key).unwrap();
+        (token, header)
+    }
+
+    fn sign_without_exp(
+        key: &jsonwebtoken::EncodingKey,
+        claims: &serde_json::Value,
+    ) -> (String, Header) {
+        let mut header = Header::new(Algorithm::EdDSA);
+        header.kid = Some("k1".to_string());
+        let token = jsonwebtoken::encode(&header, claims, key).unwrap();
         (token, header)
     }
 
@@ -1020,14 +1060,6 @@ mod test {
     }
 
     #[test]
-    fn test_authenticate_jwt_rejects_token_without_aud_when_audience_configured() {
-        let (enc, jwk) = ed25519_fixture();
-        let (token, header) = sign(&enc, serde_json::json!({ "iss": ISS, "sub": "u" }));
-        let err = verify(&jwk, &token, &header, &[]).unwrap_err();
-        assert_eq!(err.rejection(), Some(&RejectionReason::AudienceMismatch));
-    }
-
-    #[test]
     fn test_authenticate_jwt_accepts_token_without_aud_when_no_audience_configured() {
         let (enc, jwk) = ed25519_fixture();
         let (token, header) = sign(&enc, serde_json::json!({ "iss": ISS, "sub": "u" }));
@@ -1062,6 +1094,88 @@ mod test {
     }
 
     #[test]
+    fn test_authenticate_jwt_distinguishes_missing_from_mismatched_audience() {
+        let (enc, jwk) = ed25519_fixture();
+        let (token, header) = sign(&enc, serde_json::json!({ "iss": ISS, "sub": "u" }));
+        let err = verify(&jwk, &token, &header, &[]).unwrap_err();
+        assert_eq!(
+            err.rejection(),
+            Some(&RejectionReason::ClaimMissing {
+                claim: "aud".to_string()
+            })
+        );
+
+        let (token, header) = sign(
+            &enc,
+            serde_json::json!({ "iss": ISS, "aud": "someone-else", "sub": "u" }),
+        );
+        let err = verify(&jwk, &token, &header, &[]).unwrap_err();
+        assert_eq!(err.rejection(), Some(&RejectionReason::AudienceMismatch));
+    }
+
+    #[test]
+    fn test_authenticate_jwt_expired_token_is_a_rejection() {
+        let (enc, jwk) = ed25519_fixture();
+        let mut header = Header::new(Algorithm::EdDSA);
+        header.kid = Some("k1".to_string());
+        let token = jsonwebtoken::encode(
+            &header,
+            &serde_json::json!({ "iss": ISS, "aud": AUD, "sub": "u", "exp": 1 }),
+            &enc,
+        )
+        .unwrap();
+        let err = verify(&jwk, &token, &header, &[]).unwrap_err();
+        assert_eq!(err.rejection(), Some(&RejectionReason::Expired));
+    }
+
+    #[test]
+    fn test_authenticate_jwt_not_yet_valid_token_is_a_rejection() {
+        let (enc, jwk) = ed25519_fixture();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let (token, header) = sign(
+            &enc,
+            serde_json::json!({ "iss": ISS, "aud": AUD, "sub": "u", "nbf": now + 3600 }),
+        );
+        let err = verify(&jwk, &token, &header, &[]).unwrap_err();
+        assert_eq!(err.rejection(), Some(&RejectionReason::NotYetValid));
+    }
+
+    #[test]
+    fn test_authenticate_jwt_unusable_expiry_is_a_rejection() {
+        let (enc, jwk) = ed25519_fixture();
+        let mut header = Header::new(Algorithm::EdDSA);
+        header.kid = Some("k1".to_string());
+        let token = jsonwebtoken::encode(
+            &header,
+            &serde_json::json!({ "iss": ISS, "aud": AUD, "sub": "u", "exp": "soon" }),
+            &enc,
+        )
+        .unwrap();
+        let err = verify(&jwk, &token, &header, &[]).unwrap_err();
+        assert_eq!(
+            err.rejection(),
+            Some(&RejectionReason::ClaimMissing {
+                claim: "exp".to_string()
+            })
+        );
+        // A token with no expiry at all is rejected the same way.
+        let (token, header) = sign_without_exp(
+            &enc,
+            &serde_json::json!({ "iss": ISS, "aud": AUD, "sub": "u" }),
+        );
+        let err = verify(&jwk, &token, &header, &[]).unwrap_err();
+        assert_eq!(
+            err.rejection(),
+            Some(&RejectionReason::ClaimMissing {
+                claim: "exp".to_string()
+            })
+        );
+    }
+
+    #[test]
     fn test_authenticate_jwt_bad_signature_is_not_a_rejection() {
         let (enc, _) = ed25519_fixture();
         let (_, other_jwk) = ed25519_fixture();
@@ -1077,23 +1191,37 @@ mod test {
         assert_eq!(err.rejection(), None);
     }
 
+    /// Time claims carry `jsonwebtoken`'s default 60 second leeway, which absorbs ordinary
+    /// clock drift between the issuer and this host. Pinned so a default change is visible.
     #[test]
-    fn test_authenticate_jwt_rejects_token_before_nbf() {
+    fn test_authenticate_jwt_tolerates_sixty_seconds_of_clock_drift() {
         let (enc, jwk) = ed25519_fixture();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
+
+        // Not valid for another 30 s: within the leeway, accepted.
         let (token, header) = sign(
             &enc,
-            serde_json::json!({ "iss": ISS, "aud": AUD, "sub": "u", "nbf": now + 3600 }),
+            serde_json::json!({ "iss": ISS, "aud": AUD, "sub": "u", "nbf": now + 30 }),
+        );
+        assert!(verify(&jwk, &token, &header, &[]).is_ok());
+
+        // Expired 30 s ago: within the leeway, accepted.
+        let (token, header) = sign_without_exp(
+            &enc,
+            &serde_json::json!({ "iss": ISS, "aud": AUD, "sub": "u", "exp": now - 30 }),
+        );
+        assert!(verify(&jwk, &token, &header, &[]).is_ok());
+
+        // Expired 10 min ago: beyond the leeway.
+        let (token, header) = sign_without_exp(
+            &enc,
+            &serde_json::json!({ "iss": ISS, "aud": AUD, "sub": "u", "exp": now - 600 }),
         );
         let err = verify(&jwk, &token, &header, &[]).unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "Failed to decode JWT Token. Failed to decode JWT token. ImmatureSignature"
-        );
-        assert_eq!(err.rejection(), None);
+        assert_eq!(err.rejection(), Some(&RejectionReason::Expired));
     }
 
     #[test]
@@ -1134,25 +1262,6 @@ mod test {
         assert_eq!(data.claims["sub"], "u");
     }
 
-    #[test]
-    fn test_authenticate_jwt_expired_is_not_a_rejection() {
-        let (enc, jwk) = ed25519_fixture();
-        let mut header = Header::new(Algorithm::EdDSA);
-        header.kid = Some("k1".to_string());
-        let token = jsonwebtoken::encode(
-            &header,
-            &serde_json::json!({ "iss": ISS, "aud": AUD, "sub": "u", "exp": 1 }),
-            &enc,
-        )
-        .unwrap();
-        let err = verify(&jwk, &token, &header, &[]).unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "Failed to decode JWT Token. Failed to decode JWT token. ExpiredSignature"
-        );
-        assert_eq!(err.rejection(), None);
-    }
-
     // ---- scope sugar ----
 
     #[test]
@@ -1178,7 +1287,11 @@ mod test {
     fn test_unsatisfiable_scopes_are_rejected_at_construction() {
         assert_eq!(
             ScopeRule::new(String::new()).unwrap_err().to_string(),
-            "Invalid scope: all_of must not contain empty strings"
+            "Invalid scope: all_of must not contain blank values"
+        );
+        assert_eq!(
+            ScopeRule::new("   ".to_string()).unwrap_err().to_string(),
+            "Invalid scope: all_of must not contain blank values"
         );
         assert_eq!(
             ScopeRule::new("read write".to_string())
@@ -1220,6 +1333,62 @@ mod test {
         let scope = ScopeRule::new("admin".to_string()).unwrap();
         assert!(!scope.matches(&serde_json::json!({ "scope": ["admin", 42] })));
         assert!(!scope.matches(&serde_json::json!({ "scope": ["admin", true] })));
+    }
+
+    /// The guard and the rule must read the same claim. When they resolve independently, a
+    /// `scope` that carries nothing sends the rule to `scp` while the guard still vets
+    /// `scope`, and a malformed `scp` passes unchecked.
+    #[test]
+    fn test_scope_rule_guards_the_claim_it_evaluates() {
+        let scope = ScopeRule::new("admin".to_string()).unwrap();
+        for empty in [
+            serde_json::json!(""),
+            serde_json::json!("   "),
+            serde_json::json!([]),
+            serde_json::json!([""]),
+            serde_json::json!({}),
+        ] {
+            for malformed in [
+                serde_json::json!(["admin", 42]),
+                serde_json::json!(["admin", true]),
+                serde_json::json!(["admin", null]),
+            ] {
+                let claims = serde_json::json!({ "scope": empty, "scp": malformed });
+                assert!(
+                    !scope.matches(&claims),
+                    "{claims} must not satisfy the scope"
+                );
+            }
+            // The same fallback with well-formed scopes does satisfy it.
+            let claims = serde_json::json!({ "scope": empty, "scp": ["admin"] });
+            assert!(scope.matches(&claims), "{claims} must satisfy the scope");
+        }
+    }
+
+    /// `Authentication::scopes` must report the scopes the requirement enforced against.
+    #[test]
+    fn test_reported_scopes_are_the_enforced_scopes() {
+        let scope = ScopeRule::new("admin".to_string()).unwrap();
+        for claims in [
+            serde_json::json!({ "scope": "", "scp": ["admin"] }),
+            serde_json::json!({ "scope": "   ", "scp": ["admin"] }),
+            serde_json::json!({ "scope": [], "scp": ["admin"] }),
+            serde_json::json!({ "scope": "admin", "scp": ["other"] }),
+        ] {
+            let auth = Authentication::builder()
+                .token_header(None)
+                .claims(claims.clone())
+                .name(None)
+                .email(None)
+                .subject(crate::Subject::new(None, "sub".to_string()))
+                .principal_type(None)
+                .build();
+            assert_eq!(
+                auth.scopes().any(|s| s == "admin"),
+                scope.matches(&claims),
+                "{claims}: reported scopes disagree with enforcement"
+            );
+        }
     }
 
     #[test]
@@ -1310,7 +1479,12 @@ mod test {
             .authenticate(&token, &crate::introspect::introspect(&token))
             .await
             .unwrap_err();
-        assert_eq!(err.rejection(), Some(&RejectionReason::AudienceMismatch));
+        assert_eq!(
+            err.rejection(),
+            Some(&RejectionReason::ClaimMissing {
+                claim: "aud".to_string()
+            })
+        );
 
         let (token, _) = sign(
             &enc,
@@ -1321,6 +1495,51 @@ mod test {
             .await
             .unwrap();
         assert_eq!(auth.subject().subject_in_idp(), "u");
+        server.abort();
+    }
+
+    /// The effective issuer list includes the issuer discovered from the provider's
+    /// `.well-known` document, which a caller cannot derive from its own configuration.
+    #[tokio::test]
+    async fn test_effective_issuers_and_audiences_are_readable() {
+        let (_, jwk) = ed25519_fixture();
+        let (issuer, server) = spawn_idp(jwks_for(&jwk)).await;
+        let authenticator = JWKSWebAuthenticator::new(&issuer, None)
+            .await
+            .unwrap()
+            .set_accepted_audiences(vec![AUD.to_string()])
+            .add_additional_issuers(vec!["https://sts.example.com".to_string()]);
+        assert_eq!(
+            authenticator.issuers(),
+            [issuer.clone(), "https://sts.example.com".to_string()]
+        );
+        assert_eq!(authenticator.audiences(), [AUD.to_string()]);
+        server.abort();
+    }
+
+    /// `limes` classifies an unknown key id by the message `jwks_client_rs` produces, so a
+    /// change to that message must fail here rather than silently reclassify the error.
+    #[tokio::test]
+    async fn test_unknown_key_id_is_an_authentication_failure() {
+        let (enc, jwk) = ed25519_fixture();
+        let (issuer, server) = spawn_idp(jwks_for(&jwk)).await;
+        let authenticator = JWKSWebAuthenticator::new(&issuer, None).await.unwrap();
+        let mut header = Header::new(Algorithm::EdDSA);
+        header.kid = Some("not-in-the-jwks".to_string());
+        let token = jsonwebtoken::encode(
+            &header,
+            &serde_json::json!({ "iss": issuer, "sub": "u", "exp": 9_999_999_999_i64 }),
+            &enc,
+        )
+        .unwrap();
+        let err = authenticator
+            .authenticate(&token, &crate::introspect::introspect(&token))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Authentication failed: Token key id not found in JWKS."
+        );
         server.abort();
     }
 

@@ -11,6 +11,20 @@ pub enum RejectionReason {
     AudienceMismatch,
     /// The `iss` claim matched none of the accepted issuers.
     IssuerMismatch,
+    /// A claim required for validation is absent, or is present but fails to parse as the
+    /// type its specification requires — the two are indistinguishable at this layer. Named
+    /// by the JWT specification (`aud`, `iss`, `exp`, …), never by the token.
+    ClaimMissing { claim: String },
+    /// The `exp` claim lies in the past.
+    Expired,
+    /// The `nbf` claim lies in the future. Commonly clock drift between the identity
+    /// provider and this host rather than a bad token.
+    NotYetValid,
+    /// A claim is present but not of the type its specification requires, and is not one of
+    /// the claims required for validation — in practice only `nbf`, since a required claim
+    /// that fails to parse is reported as [`ClaimMissing`](Self::ClaimMissing). The claim is
+    /// named by the JWT specification, never by the token.
+    ClaimMalformed { claim: String },
     /// The scope required by `set_scope` is not present.
     ScopeMissing,
     /// The named required-claim rule did not hold.
@@ -26,6 +40,12 @@ impl std::fmt::Display for RejectionReason {
         match self {
             Self::AudienceMismatch => f.write_str("audience is not accepted"),
             Self::IssuerMismatch => f.write_str("issuer is not accepted"),
+            Self::ClaimMissing { claim } => write!(f, "claim `{claim}` is missing"),
+            Self::Expired => f.write_str("token has expired"),
+            Self::NotYetValid => {
+                f.write_str("token is not valid yet; check the clocks of this host and the issuer")
+            }
+            Self::ClaimMalformed { claim } => write!(f, "claim `{claim}` is malformed"),
             Self::ScopeMissing => f.write_str("required scope is missing"),
             Self::ClaimRuleFailed { rule } => write!(f, "required-claim rule `{rule}` failed"),
             Self::SubjectClaimMissing => f.write_str("subject claim is missing"),

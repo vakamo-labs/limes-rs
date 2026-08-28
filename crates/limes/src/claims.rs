@@ -6,7 +6,12 @@
 
 use std::{borrow::Cow, collections::HashSet};
 
-/// How a string claim is split into values before set operators are applied.
+/// How a claim is read as a list of values.
+///
+/// A grant (`any_of`/`all_of`) and `exists` split a lone string into pieces; array elements
+/// are left whole, since an array already states one value per element. A deny (`none_of`)
+/// does not split at all: it looks for a banned value at any position the separator
+/// delimits, in every item, so no way of joining values can hide one from it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Separator {
@@ -26,12 +31,24 @@ pub enum ClaimOperator {
     AllOf(HashSet<String>),
     /// No claim value is in the set. A missing claim fails.
     ///
-    /// A value is the *whole* string unless a separator is configured: without one,
+    /// A value is the *whole* item unless a separator is configured: without one,
     /// `none_of ["admin"]` does NOT fire on `"scope": "openid admin"` — that claim's single
     /// value is `"openid admin"`. Configure the separator that matches the claim's format
     /// when denying values inside delimited strings.
+    ///
+    /// With a separator a deny fires wherever a banned value sits between delimiters — the
+    /// start of an item or a separator on the left, a separator or the end of the item on the
+    /// right — in every item, array elements included. It never splits, because splitting is
+    /// lossy: an item ending in a proper prefix of a multi-character separator would shift the
+    /// boundaries after it and hide the value that follows. A grant does split, and never
+    /// splits array elements, so the two directions are deliberately asymmetric — each errs
+    /// towards refusing access.
     NoneOf(HashSet<String>),
-    /// `true`: the claim is present and not `null`; `false`: absent or `null`.
+    /// `true`: the claim is populated — present, not `null`, and carrying at least one
+    /// non-empty value or, for an object, at least one member. `false`: absent or `null`.
+    ///
+    /// These are not opposites: a claim that is present but empty (`[]`, `""`, `{}`)
+    /// satisfies neither.
     Exists(bool),
 }
 
@@ -43,12 +60,15 @@ pub enum ClaimRuleError {
     InvalidClaimPath,
     #[error("{operator} must not be empty")]
     EmptyValueList { operator: &'static str },
-    #[error("{operator} must not contain empty strings")]
+    #[error("{operator} must not contain blank values")]
     EmptyValue { operator: &'static str },
     #[error("separator must not be empty")]
     EmptySeparator,
-    /// A value the separator would split can never equal a split piece, so the rule could
-    /// never match it — and a `none_of` rule would never deny it.
+    /// Grants only. A grant compares split pieces, and no piece can contain the separator,
+    /// so such a value could only ever match an array element — where the separator is
+    /// already inert, since a grant does not split elements. The rule is therefore either
+    /// dead or better written without a separator. A deny reads values by position rather
+    /// than by splitting and matches them correctly, so it accepts them.
     #[error("{operator} value `{value}` contains the separator")]
     ValueContainsSeparator {
         operator: &'static str,
@@ -62,14 +82,56 @@ pub struct ClaimRule {
     claims: Vec<String>,
     separator: Option<Separator>,
     operator: ClaimOperator,
+    /// Derived from `operator`; present only for a deny.
+    deny: Option<DenyIndex>,
+}
+
+/// Where a banned value can start, and how long it can be there.
+///
+/// A scan position tests only the values that could begin with the byte at it, so the cost of
+/// a deny follows the length of the claim rather than the size of the deny set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DenyIndex {
+    lengths_by_first_byte: std::collections::HashMap<u8, Vec<usize>>,
+}
+
+impl DenyIndex {
+    fn new(set: &HashSet<String>) -> Self {
+        let mut lengths_by_first_byte: std::collections::HashMap<u8, Vec<usize>> =
+            std::collections::HashMap::new();
+        for value in set {
+            if let Some(&first) = value.as_bytes().first() {
+                lengths_by_first_byte
+                    .entry(first)
+                    .or_default()
+                    .push(value.len());
+            }
+        }
+        for lengths in lengths_by_first_byte.values_mut() {
+            lengths.sort_unstable();
+            lengths.dedup();
+        }
+        Self {
+            lengths_by_first_byte,
+        }
+    }
+
+    /// The lengths a banned value can have starting at `start`, empty when none can.
+    fn lengths_at(&self, item: &str, start: usize) -> &[usize] {
+        item.as_bytes()
+            .get(start)
+            .and_then(|byte| self.lengths_by_first_byte.get(byte))
+            .map_or(&[], Vec::as_slice)
+    }
 }
 
 impl ClaimRule {
     /// At least one of `values` must be a value of `claim`.
     ///
-    /// `claim` is a claim name or a dotted path such as `realm_access.roles`. Every dot
-    /// nests: a claim whose name itself contains a dot (e.g. the URI-shaped
-    /// `https://example.com/roles`) is not addressable. The same applies to all constructors.
+    /// `claim` is a dotted path such as `realm_access.roles`, which nests on every dot, or —
+    /// when it contains `/` or `:` — the whole name of one claim, as identity providers use
+    /// for namespaced custom claims (`https://example.com/roles`). The same applies to all
+    /// constructors.
     ///
     /// # Errors
     /// See [`ClaimRuleError`].
@@ -102,7 +164,9 @@ impl ClaimRule {
         Self::new(claim, None, ClaimOperator::NoneOf(collect(values)))
     }
 
-    /// `claim` must be present and not `null` (`true`), or absent or `null` (`false`).
+    /// `claim` must be populated (`true`) — present, not `null`, and carrying a non-empty
+    /// value or, for an object or an array of objects, at least one member — or absent or
+    /// `null` (`false`). A claim that is present but empty satisfies neither.
     ///
     /// # Errors
     /// See [`ClaimRuleError`].
@@ -110,11 +174,13 @@ impl ClaimRule {
         Self::new(claim, None, ClaimOperator::Exists(expected))
     }
 
-    /// Split string claim values on `separator` before matching.
+    /// Read the claim as a list delimited by `separator`. A grant splits a lone string,
+    /// leaving array elements whole; a deny matches a banned value at any delimited position
+    /// in any item. See [`Separator`].
     ///
     /// # Errors
     /// [`ClaimRuleError::EmptySeparator`], or [`ClaimRuleError::ValueContainsSeparator`] if a
-    /// listed value contains the separator (it could never match a split piece).
+    /// *grant* lists a value containing the separator, which no split piece can equal.
     pub fn with_separator(self, separator: Separator) -> Result<Self, ClaimRuleError> {
         Self::new_with_claims(self.claims, Some(separator), self.operator)
     }
@@ -141,11 +207,14 @@ impl ClaimRule {
             ClaimOperator::NoneOf(v) => ("none_of", Some(v)),
             ClaimOperator::Exists(_) => ("exists", None),
         };
+        let grant = matches!(operator, ClaimOperator::AnyOf(_) | ClaimOperator::AllOf(_));
         if let Some(values) = values {
             if values.is_empty() {
                 return Err(ClaimRuleError::EmptyValueList { operator: name });
             }
-            if values.iter().any(String::is_empty) {
+            // A blank claim carries nothing, so selection skips it. A rule that could name
+            // a blank value would have one to find there, and skipping would lose it.
+            if values.iter().any(|v| v.trim().is_empty()) {
                 return Err(ClaimRuleError::EmptyValue { operator: name });
             }
             let split_by_separator = |v: &str| match &separator {
@@ -153,27 +222,36 @@ impl ClaimRule {
                 Some(Separator::Literal(sep)) => v.contains(sep.as_str()),
                 None => false,
             };
-            if let Some(value) = values.iter().find(|v| split_by_separator(v)) {
+            // A deny reads values by position, not by splitting, so it can name a value that
+            // contains the separator. A grant compares split pieces, where such a value is dead.
+            if grant && let Some(value) = values.iter().find(|v| split_by_separator(v)) {
                 return Err(ClaimRuleError::ValueContainsSeparator {
                     operator: name,
                     value: value.clone(),
                 });
             }
         }
+        let deny = match &operator {
+            ClaimOperator::NoneOf(set) => Some(DenyIndex::new(set)),
+            _ => None,
+        };
         Ok(Self {
             claims,
             separator,
             operator,
+            deny,
         })
     }
 
-    /// Add a fallback claim path, consulted only when every earlier path is absent or `null`.
+    /// Add a fallback claim path, consulted when every earlier path is absent, `null`, or
+    /// carries nothing.
     ///
-    /// The first present path decides the rule alone: with `none_of`, a banned value that
-    /// appears only in a fallback path is not seen when the primary path is present.
+    /// The first populated path decides the rule alone: with `none_of`, a banned value that
+    /// appears only in a fallback path is not seen when an earlier path is populated.
     ///
     /// # Errors
-    /// [`ClaimRuleError::InvalidClaimPath`] if the path is empty or has empty segments.
+    /// [`ClaimRuleError::InvalidClaimPath`] if the path is empty, or nests on a dot with an
+    /// empty segment.
     pub fn or_claim(mut self, claim: impl Into<String>) -> Result<Self, ClaimRuleError> {
         self.claims.push(validate_path(claim.into())?);
         Ok(self)
@@ -193,52 +271,202 @@ impl ClaimRule {
 
     /// Evaluate the rule against decoded claims.
     ///
-    /// The claim is the first path that is present and not `null`; if there is none it is
-    /// *missing*. A present claim is a set of values: a scalar is its canonical string, an
-    /// array of scalars is its elements, and strings are split by the separator. Objects and
-    /// arrays holding non-scalars are *malformed*: they exist but match no value.
+    /// The claim is chosen by [`resolve`]: the first path that is *populated*, falling back
+    /// to the first path that is present and not `null`; if there is none it is *missing*.
+    /// Preferring a populated path keeps an empty one — an `IdP` that emits `"scope": ""` —
+    /// from hiding a fallback that carries values, which would void a deny written over both.
+    ///
+    /// A present claim is a set of values: a scalar is its canonical string, an array of
+    /// scalars is its elements, and a grant splits strings by the separator. Objects and
+    /// arrays holding non-scalars are *malformed*: they exist but carry no value.
+    ///
+    /// `exists: true` holds when the claim is *populated*: it carries at least one non-empty
+    /// value, or — being malformed and so carrying none — holds at least one member or
+    /// element. A claim that is present but empty (`[]`, `""`, `{}`) satisfies it no more
+    /// than a missing one. `exists: false` keeps its narrow meaning of absent or `null`, so
+    /// the two are not complements: an empty claim fails both.
+    /// The claim this rule reads, by the one rule every reader must use.
+    pub(crate) fn resolve<'a>(
+        &self,
+        claims: &'a serde_json::Value,
+    ) -> Option<&'a serde_json::Value> {
+        resolve(claims, self.claims.iter().map(String::as_str))
+    }
+
     #[must_use]
     pub fn matches(&self, claims: &serde_json::Value) -> bool {
-        let value = self
-            .claims
-            .iter()
-            .filter_map(|path| navigate(claims, path))
-            .find(|v| !v.is_null());
-        let items = value.and_then(scalars);
         let separator = self.separator.as_ref();
-        let values = || items.map(|items| ClaimValues::new(items, separator));
+        let value = self.resolve(claims);
+        let items = value.and_then(scalars);
+        let values = || items.map(|(items, split)| ClaimValues::new(items, separator, split));
         match &self.operator {
-            ClaimOperator::Exists(expected) => value.is_some() == *expected,
+            ClaimOperator::Exists(true) => value.is_some_and(is_populated),
+            ClaimOperator::Exists(false) => value.is_none(),
             ClaimOperator::AnyOf(set) => values().is_some_and(|mut v| v.any(|x| set.contains(&*x))),
-            ClaimOperator::NoneOf(set) => {
-                values().is_some_and(|mut v| !v.any(|x| set.contains(&*x)))
-            }
-            ClaimOperator::AllOf(set) => items.is_some_and(|items| {
+            // A deny reads every item by position rather than by splitting, so no reading of
+            // the claim can yield a banned value — array elements included, which a grant
+            // never splits.
+            ClaimOperator::NoneOf(set) => items.is_some_and(|(items, _)| {
+                let deny = self.deny.as_ref();
+                !items
+                    .iter()
+                    .any(|item| is_banned(&scalar_text(item), set, deny, separator))
+            }),
+            // Splitting is the expensive part, so a multi-value `all_of` over a split string
+            // splits once instead of once per needle.
+            ClaimOperator::AllOf(set) if separator.is_some() && set.len() > 1 => values()
+                .is_some_and(|v| {
+                    let values: Vec<_> = v.collect();
+                    set.iter()
+                        .all(|needle| values.iter().any(|x| **x == **needle))
+                }),
+            ClaimOperator::AllOf(set) => items.is_some_and(|(items, split)| {
                 set.iter()
-                    .all(|needle| ClaimValues::new(items, separator).any(|x| *x == **needle))
+                    .all(|needle| ClaimValues::new(items, separator, split).any(|x| *x == **needle))
             }),
         }
     }
 }
 
+/// The claim a set of paths reads: the first *populated* path, falling back to the first
+/// path that is present and not `null`.
+///
+/// Every reader of a claim — a rule, the scope requirement, [`Authentication::scopes`] — must
+/// resolve through here. A reader that resolves independently can end up guarding one claim
+/// while another is evaluated. Selection deliberately ignores the separator, so which claim
+/// is read is a property of the token rather than of how a rule happens to be formatted.
+///
+/// [`Authentication::scopes`]: crate::Authentication::scopes
+pub(crate) fn resolve<'a, 'p, I>(
+    claims: &'a serde_json::Value,
+    paths: I,
+) -> Option<&'a serde_json::Value>
+where
+    I: IntoIterator<Item = &'p str> + Clone,
+{
+    let present = |paths: I| {
+        paths
+            .into_iter()
+            .filter_map(|path| navigate(claims, path))
+            .filter(|v| !v.is_null())
+    };
+    // A present but empty path must not hide a later one that carries values, or an `IdP`
+    // that emits `"scope": ""` would void every deny written over a fallback. When no path is
+    // populated the first present one still decides, so `exists: false` keeps meaning absent
+    // or `null`.
+    present(paths.clone())
+        .find(|v| is_populated(v))
+        .or_else(|| present(paths).next())
+}
+
+/// Whether a claim carries content: at least one value that is not blank or, for a claim that
+/// is malformed and so carries no comparable value, at least one member or element.
+///
+/// Blank means empty or all whitespace. A whitespace-only claim states nothing, and saying so
+/// without consulting a separator keeps this a property of the data alone.
+fn is_populated(value: &serde_json::Value) -> bool {
+    match (value, scalars(value)) {
+        (_, Some((items, _))) => items.iter().any(|v| !scalar_text(v).trim().is_empty()),
+        (serde_json::Value::Object(map), None) => !map.is_empty(),
+        (serde_json::Value::Array(items), None) => !items.is_empty(),
+        (_, None) => false,
+    }
+}
+
+/// The comparable text of a scalar item.
+fn scalar_text(value: &serde_json::Value) -> Cow<'_, str> {
+    match value {
+        serde_json::Value::String(s) => Cow::Borrowed(s),
+        other => Cow::Owned(other.to_string()),
+    }
+}
+
+/// Whether `item` carries a value the deny set names.
+///
+/// A value is *delimited* when it runs from the start of the item or a separator to the end
+/// of the item or a separator. Splitting cannot decide this: [`str::split`] is exact and
+/// non-overlapping, so an item ending in a proper prefix of a multi-character separator
+/// shifts every boundary after it — `"a:::admin".split("::")` yields `["a", ":admin"]` and
+/// never produces `admin`, hiding a banned group from the deny. Scanning from every position
+/// a value could start at sees all readings, so no join can smuggle a banned value through.
+///
+/// `index` narrows each position to the values that could begin there, so the scan costs a
+/// lookup per candidate length rather than a comparison per banned value.
+fn is_banned(
+    item: &str,
+    set: &HashSet<String>,
+    index: Option<&DenyIndex>,
+    separator: Option<&Separator>,
+) -> bool {
+    if set.contains(item) {
+        return true;
+    }
+    // Without a separator in the item there is one position and one length that can be
+    // delimited: the whole item, already tested above.
+    let Some(separator) = separator.filter(|s| contains_separator(item, s)) else {
+        return false;
+    };
+    let Some(index) = index else {
+        return false;
+    };
+    let banned_at = |start: usize| {
+        index.lengths_at(item, start).iter().any(|&len| {
+            item.get(start..start + len).is_some_and(|value| {
+                set.contains(value) && ends_delimited(item, start + len, separator)
+            })
+        })
+    };
+    banned_at(0)
+        || match separator {
+            Separator::Whitespace => item
+                .char_indices()
+                .filter(|(_, c)| c.is_whitespace())
+                .any(|(i, c)| banned_at(i + c.len_utf8())),
+            // Overlapping occurrences count: `":::"` starts a value at two offsets.
+            Separator::Literal(literal) => (0..item.len())
+                .filter(|&i| item.is_char_boundary(i) && item[i..].starts_with(literal.as_str()))
+                .any(|i| banned_at(i + literal.len())),
+        }
+}
+
+/// Whether the separator occurs in `item` at all.
+fn contains_separator(item: &str, separator: &Separator) -> bool {
+    match separator {
+        Separator::Whitespace => item.contains(char::is_whitespace),
+        Separator::Literal(sep) => item.contains(sep.as_str()),
+    }
+}
+
+/// Whether a value ending at `end` is closed by the end of the item or by a separator.
+fn ends_delimited(item: &str, end: usize, separator: &Separator) -> bool {
+    end == item.len()
+        || match separator {
+            Separator::Whitespace => item[end..].starts_with(char::is_whitespace),
+            Separator::Literal(sep) => item[end..].starts_with(sep.as_str()),
+        }
+}
+
 /// The scalar items of a claim value: the value itself, or the elements of an array of
 /// scalars. `None` for objects and arrays holding non-scalars.
-pub(crate) fn scalars(value: &serde_json::Value) -> Option<&[serde_json::Value]> {
+///
+/// The flag reports whether the claim was a lone scalar rather than an array, which is the
+/// only case a separator may split.
+pub(crate) fn scalars(value: &serde_json::Value) -> Option<(&[serde_json::Value], bool)> {
     match value {
-        serde_json::Value::Array(items) if items.iter().all(is_scalar) => Some(items),
-        v if is_scalar(v) => Some(std::slice::from_ref(v)),
+        serde_json::Value::Array(items) if items.iter().all(is_scalar) => Some((items, false)),
+        v if is_scalar(v) => Some((std::slice::from_ref(v), true)),
         _ => None,
     }
 }
 
 /// Like [`scalars`], but only a string or an array of strings qualifies; numbers and booleans
 /// make the claim malformed. Used for scopes, which are strings by definition.
-pub(crate) fn strings(value: &serde_json::Value) -> Option<&[serde_json::Value]> {
+pub(crate) fn strings(value: &serde_json::Value) -> Option<(&[serde_json::Value], bool)> {
     match value {
         serde_json::Value::Array(items) if items.iter().all(serde_json::Value::is_string) => {
-            Some(items)
+            Some((items, false))
         }
-        serde_json::Value::String(_) => Some(std::slice::from_ref(value)),
+        serde_json::Value::String(_) => Some((std::slice::from_ref(value), true)),
         _ => None,
     }
 }
@@ -252,14 +480,27 @@ fn collect<I: IntoIterator<Item = S>, S: Into<String>>(values: I) -> HashSet<Str
 }
 
 fn validate_path(path: String) -> Result<String, ClaimRuleError> {
-    if path.is_empty() || path.split('.').any(str::is_empty) {
+    if path.is_empty() || (!is_claim_name(&path) && path.split('.').any(str::is_empty)) {
         return Err(ClaimRuleError::InvalidClaimPath);
     }
     Ok(path)
 }
 
+/// Whether a path names one claim outright rather than describing a nesting.
+///
+/// Identity providers namespace custom claims as URIs (`https://example.com/roles`,
+/// `kubernetes.io/serviceaccount/namespace`). A nesting never contains `/` or `:`, so those
+/// characters distinguish the two without ambiguity.
+fn is_claim_name(path: &str) -> bool {
+    path.contains(['/', ':'])
+}
+
 /// Streams the comparable values of scalar items without collecting: strings are borrowed
 /// (and split by the separator, empty pieces dropped), numbers and booleans are formatted.
+///
+/// The separator applies only when the claim is a lone string. An array already states one
+/// value per element, so splitting its elements would manufacture values the issuer never
+/// put in the token — `["x,admin"]` must not satisfy a rule for `admin`.
 pub(crate) struct ClaimValues<'a> {
     items: std::slice::Iter<'a, serde_json::Value>,
     separator: Option<&'a Separator>,
@@ -272,10 +513,15 @@ enum Pieces<'a> {
 }
 
 impl<'a> ClaimValues<'a> {
-    pub(crate) fn new(items: &'a [serde_json::Value], separator: Option<&'a Separator>) -> Self {
+    /// `separator` is applied only if `items` is a lone string claim, not array elements.
+    pub(crate) fn new(
+        items: &'a [serde_json::Value],
+        separator: Option<&'a Separator>,
+        split: bool,
+    ) -> Self {
         Self {
             items: items.iter(),
-            separator,
+            separator: if split { separator } else { None },
             pending: None,
         }
     }
@@ -311,16 +557,21 @@ impl<'a> Iterator for ClaimValues<'a> {
     }
 }
 
-/// Navigate nested claims using dot-notation (e.g. `resource_access.account.roles`).
-/// Every dot nests — a claim whose *name* contains a dot (e.g. the URI-shaped
-/// `https://example.com/roles`) is not addressable, so a flat key can never shadow the
-/// nested claim a rule targets. Returns `None` if the path is absent.
+/// Resolve a claim path.
+///
+/// A path containing `/` or `:` names a single claim and is looked up whole — that is how
+/// identity providers namespace custom claims (`https://example.com/roles`). Any other path
+/// nests on every dot, so a flat claim spelled like a nesting can never shadow the nested
+/// claim a rule targets. Returns `None` if the path is absent.
 pub(crate) fn navigate<'a>(
     claims: &'a serde_json::Value,
-    dot_path: &str,
+    path: &str,
 ) -> Option<&'a serde_json::Value> {
+    if is_claim_name(path) {
+        return claims.get(path);
+    }
     let mut current = claims;
-    for part in dot_path.split('.') {
+    for part in path.split('.') {
         current = current.get(part)?;
     }
     Some(current)
@@ -383,14 +634,21 @@ mod tests {
         );
         // `with_separator` revalidates values against the separator.
         assert_eq!(
-            ClaimRule::none_of("groups", ["Domain Admins"])
+            ClaimRule::any_of("groups", ["Domain Admins"])
                 .unwrap()
                 .with_separator(Separator::Whitespace)
                 .unwrap_err(),
             ClaimRuleError::ValueContainsSeparator {
-                operator: "none_of",
+                operator: "any_of",
                 value: "Domain Admins".to_string(),
             }
+        );
+        // A deny may name such a value: it is read by position, not by splitting.
+        assert!(
+            ClaimRule::none_of("groups", ["Domain Admins"])
+                .unwrap()
+                .with_separator(Separator::Whitespace)
+                .is_ok()
         );
         // The separator survives `or_claim`.
         assert_eq!(
@@ -412,6 +670,43 @@ mod tests {
         assert_eq!(
             ClaimRule::new("", None, any_of(&["a"])).unwrap_err(),
             ClaimRuleError::InvalidClaimPath
+        );
+    }
+
+    /// Identity providers namespace custom claims as URIs. Such a name is looked up whole,
+    /// so the rule works and `exists: false` cannot be satisfied by a path that could never
+    /// resolve.
+    #[test]
+    fn uri_shaped_claim_names_are_looked_up_whole() {
+        let claims = json!({
+            "https://myapp.example.com/org": ["tenant-a"],
+            "kubernetes.io/serviceaccount/namespace": "prod",
+        });
+        assert!(
+            ClaimRule::any_of("https://myapp.example.com/org", ["tenant-a"])
+                .unwrap()
+                .matches(&claims)
+        );
+        assert!(
+            ClaimRule::any_of("kubernetes.io/serviceaccount/namespace", ["prod"])
+                .unwrap()
+                .matches(&claims)
+        );
+        assert!(
+            ClaimRule::exists("https://myapp.example.com/org", true)
+                .unwrap()
+                .matches(&claims)
+        );
+        assert!(
+            !ClaimRule::exists("https://myapp.example.com/org", false)
+                .unwrap()
+                .matches(&claims)
+        );
+        // Empty segments are only meaningful for a nesting, so a URI keeps its `//`.
+        assert!(
+            ClaimRule::exists("https://other.example.com/x", false)
+                .unwrap()
+                .matches(&claims)
         );
     }
 
@@ -449,16 +744,16 @@ mod tests {
     }
 
     #[test]
-    fn new_rejects_values_the_separator_would_split() {
+    fn new_rejects_grant_values_the_separator_would_split() {
         assert_eq!(
             ClaimRule::new(
                 "groups",
                 Some(Separator::Whitespace),
-                none_of(&["Domain Admins"])
+                all_of(&["Domain Admins"])
             )
             .unwrap_err(),
             ClaimRuleError::ValueContainsSeparator {
-                operator: "none_of",
+                operator: "all_of",
                 value: "Domain Admins".to_string(),
             }
         );
@@ -470,6 +765,11 @@ mod tests {
                 value: "a,b".to_string(),
             }
         );
+        // A deny may name a value containing the separator, and denies it.
+        let r =
+            ClaimRule::new("c", Some(Separator::Literal(",".into())), none_of(&["a,b"])).unwrap();
+        assert!(!r.matches(&serde_json::json!({ "c": "x,a,b" })));
+        assert!(r.matches(&serde_json::json!({ "c": "x,ab" })));
         // Without a separator a value may contain anything.
         assert!(ClaimRule::new("c", None, none_of(&["Domain Admins"])).is_ok());
     }
@@ -540,7 +840,7 @@ mod tests {
         assert!(!r(all_of(&["a"])).matches(&claims));
         // Like an empty array: present, nothing to deny.
         assert!(r(none_of(&["a"])).matches(&claims));
-        assert!(r(ClaimOperator::Exists(true)).matches(&claims));
+        assert!(!r(ClaimOperator::Exists(true)).matches(&claims));
     }
 
     #[test]
@@ -554,28 +854,74 @@ mod tests {
         assert!(!rule("c", none_of(&["a"])).matches(&claims));
     }
 
+    /// `exists: true` asks whether the claim carries a value, so the wire form of
+    /// "belongs to nothing" — an empty array or an empty string — does not satisfy it.
+    /// `exists: false` keeps its narrow meaning (absent or `null`), so the two are not
+    /// complements: both reject a claim that is present but carries nothing.
     #[test]
-    fn empty_array_matches_nothing_but_exists() {
+    fn empty_array_matches_no_operator() {
         let claims = claims_with(&json!([]));
         assert!(!rule("c", any_of(&["a"])).matches(&claims));
         assert!(!rule("c", all_of(&["a"])).matches(&claims));
         assert!(rule("c", none_of(&["a"])).matches(&claims));
-        assert!(rule("c", ClaimOperator::Exists(true)).matches(&claims));
+        assert!(!rule("c", ClaimOperator::Exists(true)).matches(&claims));
         assert!(!rule("c", ClaimOperator::Exists(false)).matches(&claims));
     }
 
     #[test]
-    fn object_claim_fails_every_operator_except_exists_true() {
+    fn exists_true_requires_a_non_empty_value() {
+        for empty in [json!([]), json!(""), json!({}), json!(["", ""])] {
+            let claims = claims_with(&empty);
+            assert!(
+                !rule("c", ClaimOperator::Exists(true)).matches(&claims),
+                "{empty} must not satisfy exists=true"
+            );
+            assert!(
+                !rule("c", ClaimOperator::Exists(false)).matches(&claims),
+                "{empty} is present, so exists=false must not hold either"
+            );
+        }
+        for present in [json!("a"), json!(0), json!(false), json!(["a"])] {
+            let claims = claims_with(&present);
+            assert!(
+                rule("c", ClaimOperator::Exists(true)).matches(&claims),
+                "{present} must satisfy exists=true"
+            );
+        }
+    }
+
+    /// An object carries no comparable value, so no set operator can hold. `exists` asks a
+    /// different question — whether the claim is populated — and a populated object is.
+    #[test]
+    fn object_claim_matches_no_set_operator_but_is_populated() {
         let claims = claims_with(&json!({"a": "b"}));
         assert!(!rule("c", any_of(&["a"])).matches(&claims));
         assert!(!rule("c", all_of(&["a"])).matches(&claims));
         assert!(!rule("c", none_of(&["zzz"])).matches(&claims));
         assert!(rule("c", ClaimOperator::Exists(true)).matches(&claims));
         assert!(!rule("c", ClaimOperator::Exists(false)).matches(&claims));
+
+        // A Keycloak-shaped nested claim is reachable both ways.
+        let keycloak = json!({ "realm_access": { "roles": ["admin"] } });
+        assert!(
+            ClaimRule::exists("realm_access", true)
+                .unwrap()
+                .matches(&keycloak)
+        );
+        assert!(
+            ClaimRule::any_of("realm_access.roles", ["admin"])
+                .unwrap()
+                .matches(&keycloak)
+        );
+
+        // An empty object is present but not populated.
+        let empty = claims_with(&json!({}));
+        assert!(!rule("c", ClaimOperator::Exists(true)).matches(&empty));
+        assert!(!rule("c", ClaimOperator::Exists(false)).matches(&empty));
     }
 
     #[test]
-    fn array_with_non_scalar_element_fails_every_operator_except_exists_true() {
+    fn array_with_non_scalar_element_matches_no_set_operator() {
         for value in [
             json!(["a", ["b"]]),
             json!(["a", {"k": "v"}]),
@@ -583,8 +929,11 @@ mod tests {
         ] {
             let claims = claims_with(&value);
             assert!(!rule("c", any_of(&["a"])).matches(&claims));
+            assert!(!rule("c", all_of(&["a"])).matches(&claims));
             assert!(!rule("c", none_of(&["zzz"])).matches(&claims));
+            // Not comparable, but populated.
             assert!(rule("c", ClaimOperator::Exists(true)).matches(&claims));
+            assert!(!rule("c", ClaimOperator::Exists(false)).matches(&claims));
         }
     }
 
@@ -608,9 +957,9 @@ mod tests {
     }
 
     #[test]
-    fn empty_string_claim_exists() {
+    fn empty_string_claim_carries_no_value() {
         let claims = claims_with(&json!(""));
-        assert!(rule("c", ClaimOperator::Exists(true)).matches(&claims));
+        assert!(!rule("c", ClaimOperator::Exists(true)).matches(&claims));
         assert!(!rule("c", any_of(&["a"])).matches(&claims));
     }
 
@@ -659,15 +1008,28 @@ mod tests {
         assert!(r.matches(&claims));
     }
 
+    /// An array states one value per element. Splitting elements would manufacture values
+    /// the issuer never put in the token, so a rule for `admin` must not match
+    /// `["x,admin"]`.
     #[test]
-    fn separator_applies_to_each_string_array_element() {
+    fn separator_does_not_split_array_elements() {
         let claims = claims_with(&json!(["openid email", "profile"]));
         let r = rule_sep(
             "c",
             Separator::Whitespace,
             all_of(&["openid", "email", "profile"]),
         );
-        assert!(r.matches(&claims));
+        assert!(!r.matches(&claims));
+        // Unsplit, each element is one value — matched by a rule without a separator.
+        assert!(rule("c", all_of(&["openid email", "profile"])).matches(&claims));
+
+        let smuggled = claims_with(&json!(["x,platform-admins"]));
+        let r = rule_sep(
+            "c",
+            Separator::Literal(",".into()),
+            any_of(&["platform-admins"]),
+        );
+        assert!(!r.matches(&smuggled));
     }
 
     #[test]
@@ -701,15 +1063,10 @@ mod tests {
         });
         assert!(!rule("realm_access.roles", none_of(&["banned"])).matches(&attack));
 
-        // A `null` flat key cannot hide the nested claim from `exists`.
+        // A flat key spelled like the nesting, even a `null` one, cannot hide it.
         let null_flat = json!({ "a.b": null, "a": { "b": "real" } });
         assert!(rule("a.b", ClaimOperator::Exists(true)).matches(&null_flat));
         assert!(!rule("a.b", ClaimOperator::Exists(false)).matches(&null_flat));
-
-        // Consequence: a URI-shaped claim name is not addressable.
-        let uri = json!({ "https://example.com/roles": ["admin"] });
-        assert!(!rule("https://example.com/roles", any_of(&["admin"])).matches(&uri));
-        assert!(!rule("https://example.com/roles", ClaimOperator::Exists(true)).matches(&uri));
     }
 
     /// Pins the documented `none_of` semantics: without a separator the whole string is one
@@ -758,6 +1115,314 @@ mod tests {
             .unwrap();
         assert!(r.matches(&json!({})));
         assert!(!r.matches(&json!({ "scp": "x" })));
+    }
+
+    /// A multi-value `all_of` takes the split-once path; it must agree with the general one.
+    #[test]
+    fn all_of_over_a_split_string_matches_every_value() {
+        let claims = claims_with(&json!("a b c"));
+        let r = |v: &[&str]| rule_sep("c", Separator::Whitespace, all_of(v));
+        assert!(r(&["a", "b"]).matches(&claims));
+        assert!(r(&["a", "b", "c"]).matches(&claims));
+        assert!(!r(&["a", "z"]).matches(&claims));
+        assert!(!r(&["a", "b", "c", "d"]).matches(&claims));
+        assert!(r(&["a"]).matches(&claims));
+    }
+
+    /// A deny must not be evadable by embedding the banned value in an array element, even
+    /// though a grant deliberately refuses to split those elements.
+    /// `str::split` is exact and non-overlapping, so an item ending in a proper prefix of a
+    /// multi-character separator shifts every later boundary. Reading by position instead of
+    /// by splitting denies the value under every join the issuer could have produced.
+    #[test]
+    fn none_of_denies_across_a_shifted_multi_character_separator() {
+        // `"a:::admin".split("::")` is `["a", ":admin"]` — `admin` is never produced.
+        assert_eq!("a:::admin".split("::").collect::<Vec<_>>(), ["a", ":admin"]);
+        let r = rule_sep("c", Separator::Literal("::".into()), none_of(&["admin"]));
+        // Denied whichever side the shifting group sits on.
+        assert!(!r.matches(&serde_json::json!({ "c": "a:::admin" })));
+        assert!(!r.matches(&serde_json::json!({ "c": "admin::a:" })));
+        assert!(!r.matches(&serde_json::json!({ "c": ["x", "a:::admin"] })));
+        // A value that is not delimited is still not a value.
+        assert!(r.matches(&serde_json::json!({ "c": "a:::xadmin" })));
+        assert!(r.matches(&serde_json::json!({ "c": "superadmin" })));
+
+        let r = rule_sep("c", Separator::Literal("--".into()), none_of(&["admin"]));
+        assert!(!r.matches(&serde_json::json!({ "c": "eng---admin" })));
+        assert!(r.matches(&serde_json::json!({ "c": "eng-admin" })));
+    }
+
+    /// A banned value must be closed on the right too, or the deny degrades to a substring
+    /// match and refuses values that merely start with one.
+    #[test]
+    fn none_of_admits_a_value_that_only_starts_with_a_banned_one() {
+        let literal = rule_sep("c", Separator::Literal("::".into()), none_of(&["admin"]));
+        assert!(literal.matches(&serde_json::json!({ "c": "x::adminx" })));
+        assert!(!literal.matches(&serde_json::json!({ "c": "x::admin" })));
+        let whitespace = rule_sep("c", Separator::Whitespace, none_of(&["admin"]));
+        assert!(whitespace.matches(&serde_json::json!({ "c": "x adminx" })));
+        assert!(!whitespace.matches(&serde_json::json!({ "c": "x admin" })));
+    }
+
+    /// Scanning for a literal separator walks byte offsets, so a multi-byte character must
+    /// not be sliced through.
+    #[test]
+    fn none_of_scans_multi_byte_items_without_slicing_a_character() {
+        let r = rule_sep("c", Separator::Literal(":".into()), none_of(&["user"]));
+        assert!(!r.matches(&serde_json::json!({ "c": "café:user" })));
+        assert!(r.matches(&serde_json::json!({ "c": "café:users" })));
+        let r = rule_sep("c", Separator::Literal("é".into()), none_of(&["user"]));
+        assert!(!r.matches(&serde_json::json!({ "c": "caféuser" })));
+    }
+
+    /// Every value a deny must catch, checked against an oracle that enumerates the joins an
+    /// issuer could have written. Splitting misses the shifted ones; scanning by position
+    /// does not.
+    #[test]
+    fn none_of_agrees_with_an_oracle_over_every_short_join() {
+        let sep = "::";
+        let atoms = ["a", ":", "admin", "ad"];
+        let r = rule_sep("c", Separator::Literal(sep.into()), none_of(&["admin"]));
+        let mut checked = 0_u32;
+        for len in 1..=3 {
+            let mut idx = vec![0_usize; len];
+            loop {
+                let parts: Vec<&str> = idx.iter().map(|&i| atoms[i]).collect();
+                let joined = parts.join(sep);
+                // The oracle knows what the issuer put in the token. Only the `admin` atom
+                // contains that substring, so the deny must fire exactly when it was joined
+                // in — asserting both directions, or half the cases would assert nothing.
+                let expected_denied = parts.contains(&"admin");
+                assert_eq!(
+                    !r.matches(&serde_json::json!({ "c": joined })),
+                    expected_denied,
+                    "{joined:?} joins {parts:?}"
+                );
+                checked += 1;
+                let mut i = len;
+                loop {
+                    if i == 0 {
+                        break;
+                    }
+                    i -= 1;
+                    idx[i] += 1;
+                    if idx[i] < atoms.len() {
+                        break;
+                    }
+                    idx[i] = 0;
+                    if i == 0 {
+                        break;
+                    }
+                }
+                if idx.iter().all(|&i| i == 0) {
+                    break;
+                }
+            }
+        }
+        assert_eq!(checked, 84);
+    }
+
+    /// An empty primary claim must not hide a fallback carrying a banned value. A populated
+    /// primary still decides alone — that is the documented `or_claim` rule, not a fail-open,
+    /// since which claim is read must not depend on what the deny happens to list.
+    #[test]
+    fn an_empty_path_does_not_hide_a_fallback_that_carries_a_banned_value() {
+        let r = ClaimRule::none_of("scope", ["banned"])
+            .unwrap()
+            .with_separator(Separator::Whitespace)
+            .unwrap()
+            .or_claim("scp")
+            .unwrap();
+        for primary in [
+            serde_json::json!(""),
+            serde_json::json!([]),
+            serde_json::json!("   "),
+            serde_json::json!({}),
+            serde_json::json!(null),
+        ] {
+            let claims = serde_json::json!({ "scope": primary, "scp": ["banned"] });
+            assert!(!r.matches(&claims), "{claims} must be denied");
+        }
+        // A populated primary still decides alone, which is the documented `or_claim` rule.
+        let claims = serde_json::json!({ "scope": "read", "scp": ["banned"] });
+        assert!(r.matches(&claims));
+    }
+
+    /// Preferring a populated path widens grants as well as denies: a token whose values sit
+    /// in the fallback now satisfies a rule the empty primary would have failed.
+    #[test]
+    fn an_empty_path_does_not_hide_a_fallback_that_carries_a_wanted_value() {
+        let any = ClaimRule::any_of("a", ["admin"])
+            .unwrap()
+            .or_claim("b")
+            .unwrap();
+        let all = ClaimRule::all_of("a", ["admin"])
+            .unwrap()
+            .or_claim("b")
+            .unwrap();
+        for empty in [json!(""), json!("   "), json!([]), json!([""]), json!({})] {
+            let claims = json!({ "a": empty, "b": ["admin"] });
+            assert!(any.matches(&claims), "{claims} must satisfy any_of");
+            assert!(all.matches(&claims), "{claims} must satisfy all_of");
+        }
+        // A populated primary still decides alone.
+        let claims = json!({ "a": "other", "b": ["admin"] });
+        assert!(!any.matches(&claims));
+        assert!(!all.matches(&claims));
+    }
+
+    /// Selection skips a blank path, so no rule may name a value that could only be found
+    /// there — otherwise a deny walks past the claim carrying its banned value.
+    #[test]
+    fn a_rule_cannot_name_a_blank_value() {
+        for blank in ["", " ", "\t", "\u{00a0}", "  \n "] {
+            for operator in [any_of(&[blank]), all_of(&[blank]), none_of(&[blank])] {
+                assert!(
+                    matches!(
+                        ClaimRule::new("c", None, operator).unwrap_err(),
+                        ClaimRuleError::EmptyValue { .. }
+                    ),
+                    "{blank:?} must not be nameable"
+                );
+            }
+        }
+        // A value merely containing whitespace is fine.
+        assert!(ClaimRule::none_of("c", ["Domain Admins"]).is_ok());
+    }
+
+    /// Which claim is read must not depend on how a rule is formatted.
+    #[test]
+    fn path_selection_ignores_the_separator() {
+        for primary in [json!("   "), json!(["   "]), json!(""), json!("x y")] {
+            let claims = json!({ "a": primary, "b": ["admin"] });
+            let plain = ClaimRule::any_of("a", ["admin"])
+                .unwrap()
+                .or_claim("b")
+                .unwrap();
+            let split = ClaimRule::any_of("a", ["admin"])
+                .unwrap()
+                .with_separator(Separator::Whitespace)
+                .unwrap()
+                .or_claim("b")
+                .unwrap();
+            assert_eq!(
+                plain.resolve(&claims),
+                split.resolve(&claims),
+                "{claims}: the separator changed which claim is read"
+            );
+        }
+    }
+
+    /// Preferring a populated path must not widen `exists: false`, which stays absent-or-null.
+    #[test]
+    fn an_empty_path_is_still_present_for_exists() {
+        for empty in [
+            serde_json::json!(""),
+            serde_json::json!([]),
+            serde_json::json!({}),
+        ] {
+            let claims = serde_json::json!({ "scope": empty, "scp": [] });
+            let r = ClaimRule::exists("scope", false)
+                .unwrap()
+                .or_claim("scp")
+                .unwrap();
+            assert!(
+                !r.matches(&claims),
+                "{claims} is present, so exists=false must fail"
+            );
+            let r = ClaimRule::exists("scope", true)
+                .unwrap()
+                .or_claim("scp")
+                .unwrap();
+            assert!(
+                !r.matches(&claims),
+                "{claims} is empty, so exists=true must fail"
+            );
+        }
+    }
+
+    /// Every operator against every degenerate claim shape, with and without a separator.
+    ///
+    /// Each fail-open found so far was a shape whose evaluation fell through to "admit". The
+    /// table states the outcome of all of them at once, so a change that flips one is visible
+    /// in the diff rather than only in a rule nobody wrote a test for. Columns are
+    /// `any_of ["admin"]`, `all_of ["admin"]`, `none_of ["admin"]`, `exists true`,
+    /// `exists false`; `none_of` is listed as it evaluates, so `false` there means *denied*.
+    #[test]
+    fn every_operator_over_every_degenerate_claim_shape() {
+        const T: bool = true;
+        const F: bool = false;
+        // shape,            no separator,        whitespace separator
+        let table: &[(Option<serde_json::Value>, [bool; 5], [bool; 5])] = &[
+            (None, [F, F, F, F, T], [F, F, F, F, T]),
+            (Some(json!(null)), [F, F, F, F, T], [F, F, F, F, T]),
+            (Some(json!("")), [F, F, T, F, F], [F, F, T, F, F]),
+            // Blank is not content, and a lone string and a one-element array agree, since
+            // neither answer consults the separator.
+            (Some(json!("   ")), [F, F, T, F, F], [F, F, T, F, F]),
+            (Some(json!(["   "])), [F, F, T, F, F], [F, F, T, F, F]),
+            (Some(json!([])), [F, F, T, F, F], [F, F, T, F, F]),
+            (Some(json!({})), [F, F, F, F, F], [F, F, F, F, F]),
+            (Some(json!({"k": "v"})), [F, F, F, T, F], [F, F, F, T, F]),
+            (Some(json!([""])), [F, F, T, F, F], [F, F, T, F, F]),
+            (Some(json!([null])), [F, F, F, T, F], [F, F, F, T, F]),
+            (Some(json!([{}])), [F, F, F, T, F], [F, F, F, T, F]),
+            (Some(json!("admin")), [T, T, F, T, F], [T, T, F, T, F]),
+            (Some(json!(["admin"])), [T, T, F, T, F], [T, T, F, T, F]),
+            // A grant reads one value; a deny sees the banned value between delimiters.
+            (Some(json!("x admin")), [F, F, T, T, F], [T, T, F, T, F]),
+            // An array element is never split for a grant, but a deny still sees inside it.
+            (Some(json!(["x admin"])), [F, F, T, T, F], [F, F, F, T, F]),
+            (Some(json!(42)), [F, F, T, T, F], [F, F, T, T, F]),
+            (Some(json!(true)), [F, F, T, T, F], [F, F, T, T, F]),
+        ];
+        let operators = || {
+            [
+                any_of(&["admin"]),
+                all_of(&["admin"]),
+                none_of(&["admin"]),
+                ClaimOperator::Exists(true),
+                ClaimOperator::Exists(false),
+            ]
+        };
+        for (shape, without, with) in table {
+            let claims = shape.as_ref().map_or_else(
+                || json!({ "other": "x" }),
+                |v| json!({ "c": v, "other": "x" }),
+            );
+            for (separator, expected) in [(None, without), (Some(Separator::Whitespace), with)] {
+                for (operator, expected) in operators().into_iter().zip(expected) {
+                    let label = format!("{shape:?} {operator:?} sep={separator:?}");
+                    let rule = ClaimRule::new("c", separator.clone(), operator).unwrap();
+                    assert_eq!(rule.matches(&claims), *expected, "{label}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn none_of_denies_a_banned_value_inside_an_array_element() {
+        let smuggled = claims_with(&json!(["x,admin"]));
+        let deny = rule_sep("c", Separator::Literal(",".into()), none_of(&["admin"]));
+        assert!(!deny.matches(&smuggled));
+        // The same claim as a lone string is denied too.
+        assert!(!deny.matches(&claims_with(&json!("x,admin"))));
+        // ...while the grant direction still refuses to manufacture the value.
+        let grant = rule_sep("c", Separator::Literal(",".into()), any_of(&["admin"]));
+        assert!(!grant.matches(&smuggled));
+
+        // Values the issuer wrote are denied regardless of the separator.
+        assert!(!deny.matches(&claims_with(&json!(["admin"]))));
+        // An unrelated claim still passes the deny.
+        assert!(deny.matches(&claims_with(&json!(["users"]))));
+
+        // The same holds for whitespace, the separator `scope` is configured with.
+        let deny = rule_sep("c", Separator::Whitespace, none_of(&["admin"]));
+        assert!(!deny.matches(&claims_with(&json!(["x admin"]))));
+        assert!(!deny.matches(&claims_with(&json!("x admin"))));
+        assert!(deny.matches(&claims_with(&json!(["xadmin"]))));
+        let grant = rule_sep("c", Separator::Whitespace, any_of(&["admin"]));
+        assert!(!grant.matches(&claims_with(&json!(["x admin"]))));
     }
 
     #[test]

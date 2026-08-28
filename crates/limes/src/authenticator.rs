@@ -15,12 +15,12 @@ pub(crate) const SCOPE_CLAIM: &str = "scope";
 /// Array-shaped alternative to `scope` emitted by some IdPs; consulted when `scope` is absent.
 pub(crate) const SCP_CLAIM: &str = "scp";
 
-/// The `scope` claim, or `scp` if `scope` is absent or `null`.
+/// The `scope` claim, or `scp` if `scope` carries no scopes.
+///
+/// Resolved through [`crate::claims::resolve`], the one owner of that choice, so the scope
+/// requirement and [`Authentication::scopes`] always read the same claim.
 pub(crate) fn scope_claim(claims: &serde_json::Value) -> Option<&serde_json::Value> {
-    [SCOPE_CLAIM, SCP_CLAIM]
-        .into_iter()
-        .filter_map(|c| claims.get(c))
-        .find(|v| !v.is_null())
+    crate::claims::resolve(claims, [SCOPE_CLAIM, SCP_CLAIM])
 }
 
 pub trait Authenticator
@@ -185,15 +185,18 @@ impl Authentication {
 
     /// Get the scopes of the token from the `scope` claim, or `scp` if `scope` is absent.
     ///
-    /// Values are read exactly as scope enforcement reads them: a whitespace-delimited string
-    /// or an array of strings, each split on whitespace. Anything else (an object, a number,
-    /// or an array holding non-strings) is malformed and yields nothing. Returns an empty
-    /// iterator if neither claim is present.
+    /// Values are read exactly as scope enforcement reads them: a lone string is split on
+    /// whitespace, while an array states one scope per element, so its strings are returned
+    /// whole and never split. Anything else (an object, a number, or an array holding
+    /// non-strings) is malformed and yields nothing. Returns an empty iterator if neither
+    /// claim is present.
     pub fn scopes(&self) -> impl Iterator<Item = &str> {
-        let items = scope_claim(&self.claims)
+        let (items, split) = scope_claim(&self.claims)
             .and_then(crate::claims::strings)
-            .unwrap_or_default();
-        crate::claims::ClaimValues::new(items, Some(&crate::claims::Separator::Whitespace))
+            .unwrap_or((&[], false));
+        // `strings` rejects non-strings, so a malformed claim yields nothing — the same
+        // reading the scope requirement enforces.
+        crate::claims::ClaimValues::new(items, Some(&crate::claims::Separator::Whitespace), split)
             .filter_map(|v| match v {
                 std::borrow::Cow::Borrowed(s) => Some(s),
                 std::borrow::Cow::Owned(_) => None,
@@ -279,12 +282,13 @@ mod test {
         assert_eq!(auth.scopes().collect::<Vec<_>>(), ["a"]);
     }
 
+    /// The array form of `scope` states one scope per element, so elements are not split.
     #[test]
-    fn test_scopes_splits_array_elements_like_enforcement() {
+    fn test_scopes_does_not_split_array_elements() {
         let auth = auth_with_claims(serde_json::json!({ "scope": ["openid profile", "email"] }));
         assert_eq!(
             auth.scopes().collect::<Vec<_>>(),
-            ["openid", "profile", "email"]
+            ["openid profile", "email"]
         );
     }
 
