@@ -9,6 +9,12 @@ on:
     branches:
       - main
 
+env:
+  # limes leaves the Kubernetes version feature of k8s-openapi to the final binary.
+  # cargo-semver-checks builds limes with all features and without dev-dependencies,
+  # so k8s-openapi needs the version from the environment.
+  K8S_OPENAPI_ENABLED_VERSION: "1.32"
+
 jobs:
   # Release unpublished packages.
   release-plz-release:
