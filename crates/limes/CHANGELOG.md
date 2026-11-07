@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0](https://github.com/vakamo-labs/limes-rs/compare/v0.6.0...v0.7.0) - 2026-11-07
+
+### Added
+
+- evaluate a claim rule against an authenticated token ([#85](https://github.com/vakamo-labs/limes-rs/pull/85))
+
+### Fixed
+
+- *(jwks)* [**breaking**] read the subject claim as a path and reject a blank one ([#82](https://github.com/vakamo-labs/limes-rs/pull/82))
+- *(claims)* [**breaking**] close separator and exists fail-open paths ([#81](https://github.com/vakamo-labs/limes-rs/pull/81))
+
+### Other
+
+- *(deps)* update base64 requirement from 0.22 to 0.23 ([#83](https://github.com/vakamo-labs/limes-rs/pull/83))
+- *(docs)* Fix Changelog
+
 ## [0.6.0](https://github.com/vakamo-labs/limes-rs/compare/v0.5.0...v0.6.0) - 2026-08-27
 
 ### Added
