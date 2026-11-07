@@ -119,6 +119,15 @@ impl Authentication {
     }
 
     #[must_use]
+    /// Whether the token's claims satisfy `rule`.
+    ///
+    /// Reads the claims the way a required-claim rule on an authenticator does, so a rule
+    /// evaluated after authentication selects the same claim as one enforced during it.
+    pub fn satisfies(&self, rule: &crate::ClaimRule) -> bool {
+        rule.matches(&self.claims)
+    }
+
+    #[must_use]
     /// Get the subject of the user.
     /// Use this to uniquely identify the user.
     pub fn subject(&self) -> &Subject {
@@ -317,5 +326,30 @@ mod test {
         assert_eq!(auth.issued_at(), None);
         assert_eq!(auth.not_before(), None);
         assert_eq!(auth.scopes().count(), 0);
+    }
+
+    #[test]
+    fn test_satisfies_reads_nested_and_uri_named_claims() {
+        let auth = auth_with_claims(serde_json::json!({
+            "realm_access": { "roles": ["engine", "reader"] },
+            "https://example.com/tier": "gold",
+        }));
+
+        let nested = crate::ClaimRule::any_of("realm_access.roles", ["engine"]).unwrap();
+        assert!(auth.satisfies(&nested));
+        let nested_miss = crate::ClaimRule::any_of("realm_access.roles", ["admin"]).unwrap();
+        assert!(!auth.satisfies(&nested_miss));
+
+        let uri = crate::ClaimRule::any_of("https://example.com/tier", ["gold"]).unwrap();
+        assert!(auth.satisfies(&uri));
+    }
+
+    #[test]
+    fn test_satisfies_fails_on_a_missing_claim() {
+        let auth = auth_with_claims(serde_json::json!({ "sub": "x" }));
+        let rule = crate::ClaimRule::any_of("azp", ["engine"]).unwrap();
+        assert!(!auth.satisfies(&rule));
+        let absent = crate::ClaimRule::exists("azp", false).unwrap();
+        assert!(auth.satisfies(&absent));
     }
 }
