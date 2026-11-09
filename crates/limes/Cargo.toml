@@ -40,7 +40,7 @@ jwks_client_rs = { version = "0.6", optional = true, default-features = false }
 # binary crate choose the Kubernetes version. The version is selected in dev-dependencies
 # (for our own tests) and by consumers (see the `kubernetes` feature docs).
 k8s-openapi = { version = "0.28", optional = true }
-kube = { version = "4.0", default-features = false, features = [
+kube = { version = "5.0", default-features = false, features = [
     "client",
 ], optional = true }
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
