@@ -15,7 +15,6 @@ k8s-openapi = { version = "0.28", features = ["v1_32"] }
 limes = { path = "../../crates/limes", default-features = false, features = [
     "jwks",
     "rustls-tls",
-    "axum",
     "kubernetes",
 ] }
 tokio = { version = "1.43", features = ["rt-multi-thread"] }

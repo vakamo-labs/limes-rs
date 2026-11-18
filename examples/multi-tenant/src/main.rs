@@ -1,7 +1,7 @@
-use axum::{Extension, middleware::from_fn_with_state, response::IntoResponse, routing::get};
+use axum::{Extension, response::IntoResponse, routing::get};
 use limes::{
-    Authentication, AuthenticatorChain, AuthenticatorEnum, axum::authentication_middleware,
-    format_subject, jwks::JWKSWebAuthenticator, kubernetes::KubernetesAuthenticator,
+    Authentication, AuthenticatorChain, AuthenticatorEnum, format_subject,
+    jwks::JWKSWebAuthenticator, kubernetes::KubernetesAuthenticator, tower::AuthenticationLayer,
 };
 
 // We recommend using a character that is never used in subject ids
@@ -35,10 +35,7 @@ async fn main() {
 
     let app = axum::Router::new()
         .route("/whoami", get(whoami))
-        .layer(from_fn_with_state(
-            chain,
-            authentication_middleware::<AuthenticatorChain<AuthenticatorEnum>>,
-        ));
+        .layer(AuthenticationLayer::new(chain));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
         .await
