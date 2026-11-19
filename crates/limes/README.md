@@ -123,3 +123,17 @@ The following feature flags are available:
 `tower::AuthenticationLayer` also works with tonic: `Server::builder().layer(AuthenticationLayer::new(authenticator))`.
 gRPC requests are rejected with a `grpc-status` instead of an HTTP status, and service methods read the
 result with `request.extensions().get::<Authentication>()`.
+
+`Server::builder().layer(..)` authenticates every service, including health checks, so Kubernetes gRPC
+probes would fail. To authenticate a single service, use tonic's `LayerExt::named_layer`:
+
+```rust,ignore
+use tonic::service::LayerExt;
+
+Server::builder()
+    .add_service(health_service)
+    .add_service(AuthenticationLayer::new(authenticator).named_layer(my_service))
+```
+
+With gRPC-Web or CORS, add `AuthenticationLayer` inside `tonic_web::GrpcWebLayer` and any CORS layer,
+so that preflight requests and gRPC-Web translation happen before authentication.

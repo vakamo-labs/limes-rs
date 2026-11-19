@@ -1,5 +1,5 @@
 use crate::Authenticator;
-use crate::tower::AuthenticationLayer;
+use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::middleware::Next;
 use axum::response::Response;
@@ -7,13 +7,13 @@ use axum_extra::{
     TypedHeader,
     headers::{Authorization, authorization::Bearer},
 };
-use tower_layer::Layer;
-use tower_service::Service;
 
 /// Middleware to authenticate requests using the provided authenticator.
 ///
-/// This is a thin wrapper around [`AuthenticationLayer`], which also works outside of
-/// `axum::middleware::from_fn_with_state` and with other tower-based servers such as tonic.
+/// This shares its authentication with [`AuthenticationLayer`](crate::tower::AuthenticationLayer),
+/// which also works outside of `axum::middleware::from_fn_with_state` and with other
+/// tower-based servers such as tonic. Unlike the layer, it always rejects with an HTTP status,
+/// also for gRPC requests.
 ///
 /// # Errors
 /// - If the authorization header is missing.
@@ -21,17 +21,16 @@ use tower_service::Service;
 /// - If no authenticator can handle the token.
 #[deprecated(note = "use `limes::tower::AuthenticationLayer` instead: \
                      `router.layer(AuthenticationLayer::new(authenticator))`")]
-pub async fn authentication_middleware<T: Authenticator + 'static>(
+pub async fn authentication_middleware<T: Authenticator>(
     State(verifiers): State<T>,
     // Kept for compatibility: axum rejects a malformed header before this function runs.
     _authorization: Option<TypedHeader<Authorization<Bearer>>>,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Response {
-    let mut service = AuthenticationLayer::new(verifiers).layer(next);
-    match service.call(request).await {
-        Ok(response) => response.map(axum::body::Body::new),
-        Err(never) => match never {},
+    match crate::tower::authenticate(&verifiers, &mut request).await {
+        Ok(()) => next.run(request).await,
+        Err(rejection) => rejection.http_response().map(Body::new),
     }
 }
 
@@ -107,6 +106,14 @@ mod tests {
 
         let request = Request::get("/")
             .header("authorization", "Bearer wrong")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        // Rejected with an HTTP status, as before the tower layer existed.
+        let request = Request::get("/")
+            .header("content-type", "application/grpc")
             .body(Body::empty())
             .unwrap();
         let response = app.oneshot(request).await.unwrap();
