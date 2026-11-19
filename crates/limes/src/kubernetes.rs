@@ -137,6 +137,12 @@ impl Authenticator for KubernetesAuthenticator {
         token: &str,
         introspection: &IntrospectionResult,
     ) -> Result<Authentication> {
+        // The API server answers an empty token with 400, which reads as a problem of this
+        // server.
+        if token.is_empty() {
+            return Err(Error::unauthenticated("Token is empty"));
+        }
+
         // If an issuer is set, the token must be JWT and the issuer must match
         if !self.issuers.is_empty() {
             match introspection {
@@ -299,7 +305,65 @@ fn validate_audience(expected: &[String], received: &[String]) -> Result<()> {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::error::ErrorKind;
     use std::collections::HashSet;
+
+    /// An authenticator whose API server answers every request with `status`, or cannot be
+    /// reached if `status` is `None`.
+    fn authenticator_with_api(status: Option<u16>) -> KubernetesAuthenticator {
+        let service = tower::service_fn(move |_: http::Request<kube::client::Body>| async move {
+            let status = status.ok_or_else(|| std::io::Error::other("connection refused"))?;
+            let body = serde_json::json!({
+                "kind": "Status", "apiVersion": "v1", "status": "Failure", "code": status
+            });
+            Ok::<_, std::io::Error>(
+                http::Response::builder()
+                    .status(status)
+                    .body(http_body_util::Full::new(bytes::Bytes::from(
+                        body.to_string(),
+                    )))
+                    .unwrap(),
+            )
+        });
+        KubernetesAuthenticator::new_with_client(
+            None,
+            vec![],
+            kube::client::Client::new(service, "default"),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_token_review_failure_kinds() {
+        for (status, expected) in [
+            (Some(401), ErrorKind::Internal),
+            (Some(403), ErrorKind::Internal),
+            (Some(429), ErrorKind::Unavailable),
+            (Some(500), ErrorKind::Unavailable),
+            (Some(503), ErrorKind::Unavailable),
+            (None, ErrorKind::Unavailable),
+        ] {
+            let err = authenticator_with_api(status)
+                .authenticate("token", &IntrospectionResult::Unknown)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, Error::KubernetesTokenReviewError(_)),
+                "{status:?}: {err}"
+            );
+            assert_eq!(err.kind(), expected, "{status:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_empty_token_is_rejected_before_token_review() {
+        let err = authenticator_with_api(None)
+            .authenticate("", &IntrospectionResult::Unknown)
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), "Authentication failed: Token is empty");
+        assert_eq!(err.kind(), ErrorKind::Unauthenticated);
+    }
 
     #[test]
     fn test_parse_review_status() {
