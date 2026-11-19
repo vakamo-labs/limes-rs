@@ -9,7 +9,7 @@ repository = { workspace = true }
 rust-version = { workspace = true }
 license = { workspace = true }
 description = """
-Limes is a multi-tenant capable Authentication middleware for OAuth2.0 and Open ID Connect with support for axum.
+Limes is a multi-tenant capable Authentication middleware for OAuth2.0 and Open ID Connect, usable as a tower layer with axum and tonic.
 """
 
 [package.metadata.docs.rs]
@@ -34,6 +34,9 @@ valuable = ["dep:valuable"]
 [dependencies]
 axum = { version = "0.8", optional = true }
 axum-extra = { version = "0.12", optional = true, features = ["typed-header"] }
+bytes = "1"
+http = "1"
+http-body-util = "0.1"
 jsonwebtoken = { version = "11.0", features = ["aws_lc_rs"] }
 jwks_client_rs = { version = "0.6", optional = true, default-features = false }
 # No version feature here: per k8s-openapi's guidance a library must let the final
@@ -47,8 +50,9 @@ reqwest = { version = "0.13", default-features = false, features = ["json"] }
 serde = { version = "1.0" }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 thiserror = { version = "2.0" }
+tower-layer = "0.3"
+tower-service = "0.3"
 tracing = { version = "^0.1", features = ["attributes"] }
-trait-variant = "0.1.2"
 typed-builder = "0.23"
 url = { version = "2.5", features = ["serde"] }
 valuable = { version = "0.1.1", optional = true, features = ["derive"] }
@@ -61,4 +65,7 @@ base64 = "0.23"
 k8s-openapi = { version = "0.28", features = ["v1_32"] }
 pretty_assertions = "1.4"
 tokio = { version = "1.43", features = ["macros", "net", "rt-multi-thread"] }
+tonic = "0.14"
+tonic-health = "0.14"
+tower = { version = "0.5", features = ["util"] }
 tracing-test = "0.2.5"

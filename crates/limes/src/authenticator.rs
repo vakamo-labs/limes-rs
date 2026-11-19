@@ -31,7 +31,7 @@ where
     /// For opaque tokens, handlers may connect to the `IdP` to validate the token.
     ///
     /// `introspection` must be the result of [`introspect`](`crate::introspect::introspect`)
-    /// for `token`. The caller computes it once and passes it in (the axum middleware does
+    /// for `token`. The caller computes it once and passes it in (the tower layer does
     /// this for you). [`AuthenticatorChain`](`crate::AuthenticatorChain`) does not introspect;
     /// it forwards the value it was given to the selected authenticator. This lets
     /// implementations reuse the already-decoded header and claims instead of decoding the

@@ -1,6 +1,6 @@
-use axum::{Extension, middleware::from_fn_with_state, response::IntoResponse, routing::get};
+use axum::{Extension, response::IntoResponse, routing::get};
 use limes::{
-    Authentication, axum::authentication_middleware, format_subject, jwks::JWKSWebAuthenticator,
+    Authentication, format_subject, jwks::JWKSWebAuthenticator, tower::AuthenticationLayer,
 };
 
 // Use none for single tenant setups
@@ -18,10 +18,7 @@ async fn main() {
 
     let app = axum::Router::new()
         .route("/whoami", get(whoami))
-        .layer(from_fn_with_state(
-            authenticator,
-            authentication_middleware::<JWKSWebAuthenticator>,
-        ));
+        .layer(AuthenticationLayer::new(authenticator));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
         .await

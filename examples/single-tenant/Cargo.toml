@@ -13,6 +13,5 @@ axum = { version = "0.8" }
 limes = { path = "../../crates/limes", default-features = false, features = [
     "jwks",
     "rustls-tls",
-    "axum",
 ] }
 tokio = { version = "1.43", features = ["rt-multi-thread"] }

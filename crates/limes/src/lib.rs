@@ -16,7 +16,7 @@
 //!
 //! # Limes
 //!
-//! Limes is a multi-tenant capable Authentication middleware for OAuth2.0 and Open ID Connect with optional support for `axum`.
+//! Limes is a multi-tenant capable Authentication middleware for OAuth2.0 and Open ID Connect, usable as a tower layer with `axum`, `tonic` and other tower-based servers.
 //! It supports the following [`Authenticator`]s natively:
 //!
 //! * [`JWKSWebAuthenticator`](`jwks::JWKSWebAuthenticator`) that fetches JWKs keys from a `.well-known/openid-configuration`, refreshes keys regularly, and validates tokens locally.
@@ -34,9 +34,9 @@
 //! # Single-Tenant Example
 //!
 //! ```no_run
-//! use axum::{middleware::from_fn_with_state, response::IntoResponse, routing::get, Extension};
+//! use axum::{response::IntoResponse, routing::get, Extension};
 //! use limes::{
-//!     axum::authentication_middleware, format_subject, jwks::JWKSWebAuthenticator, Authentication,
+//!     format_subject, jwks::JWKSWebAuthenticator, tower::AuthenticationLayer, Authentication,
 //! };
 //!
 //! // Use none for single tenant setups
@@ -54,10 +54,7 @@
 //!
 //!     let app = axum::Router::new()
 //!         .route("/whoami", get(whoami))
-//!         .layer(from_fn_with_state(
-//!             authenticator,
-//!             authentication_middleware::<JWKSWebAuthenticator>,
-//!         ));
+//!         .layer(AuthenticationLayer::new(authenticator));
 //!
 //!     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
 //!         .await
@@ -75,10 +72,10 @@
 //! Limes supports the chained Authenticators. As each Authenticator can point to a different IdP, and subject IDs are not  guaranteed to be unique across IdPs, it is important to specify the `idp_id` for each [`Authenticator`] that is used in a [`AuthenticatorChain`].
 //!
 //! ```no_run
-//! use axum::{middleware::from_fn_with_state, response::IntoResponse, routing::get, Extension};
+//! use axum::{response::IntoResponse, routing::get, Extension};
 //! use limes::{
-//!     axum::authentication_middleware, format_subject, jwks::JWKSWebAuthenticator,
-//!     kubernetes::KubernetesAuthenticator, Authentication, AuthenticatorChain, AuthenticatorEnum,
+//!     format_subject, jwks::JWKSWebAuthenticator, kubernetes::KubernetesAuthenticator,
+//!     tower::AuthenticationLayer, Authentication, AuthenticatorChain, AuthenticatorEnum,
 //! };
 //!
 //! // We recommend using a character that is never used in subject ids
@@ -112,10 +109,7 @@
 //!
 //!     let app = axum::Router::new()
 //!         .route("/whoami", get(whoami))
-//!         .layer(from_fn_with_state(
-//!             chain,
-//!             authentication_middleware::<AuthenticatorChain<AuthenticatorEnum>>,
-//!         ));
+//!         .layer(AuthenticationLayer::new(chain));
 //!
 //!     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
 //!         .await
@@ -142,7 +136,26 @@
 //!   Limes intentionally does not pin a version so the choice is left to your binary crate.
 //! * `rustls-tls`: Enable `rustls` for all dependant crates.
 //! * `jwks`: Provides the `JWKSWebAuthenticator`
-//! * `axum`: Provides axum middleware that performs the Authentication and provides the tokens Payload as extension.
+//! * `axum`: Provides the deprecated `axum::authentication_middleware`. Use [`tower::AuthenticationLayer`] instead, which needs no feature.
+//!
+//! # tonic
+//! [`tower::AuthenticationLayer`] also works with tonic: `Server::builder().layer(AuthenticationLayer::new(authenticator))`.
+//! gRPC requests are rejected with a `grpc-status` instead of an HTTP status, and service methods read the
+//! result with `request.extensions().get::<Authentication>()`.
+//!
+//! `Server::builder().layer(..)` authenticates every service, including health checks, so Kubernetes gRPC
+//! probes would fail. To authenticate a single service, use tonic's `LayerExt::named_layer`:
+//!
+//! ```rust,ignore
+//! use tonic::service::LayerExt;
+//!
+//! Server::builder()
+//!     .add_service(health_service)
+//!     .add_service(AuthenticationLayer::new(authenticator).named_layer(my_service))
+//! ```
+//!
+//! With gRPC-Web or CORS, add `AuthenticationLayer` inside `tonic_web::GrpcWebLayer` and any CORS layer,
+//! so that preflight requests and gRPC-Web translation happen before authentication.
 
 mod authenticator;
 mod chain;
@@ -152,6 +165,7 @@ pub mod introspect;
 #[cfg(feature = "jwks")]
 pub mod jwks;
 mod subject;
+pub mod tower;
 
 #[cfg(feature = "kubernetes")]
 pub mod kubernetes;
