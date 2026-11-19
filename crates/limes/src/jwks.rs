@@ -42,10 +42,16 @@ const AUD_CLAIM: &str = "aud";
 ///
 /// If `scope` is provided, the token must contain the provided scope.
 ///
-/// The JWKS is fetched when a token needs a key, and again when the keys are older than
-/// `ttl` (one hour if `ttl` is `None`) or a token names a key id that is not among them.
-/// If a fetch fails, the keys of the previous fetch stay in use. Keys that cannot verify
-/// signatures, such as encryption keys and symmetric keys, are not used.
+/// The JWKS is fetched when the authenticator is created, in the background once the keys
+/// are older than `ttl` (one hour if `ttl` is `None`), and when a token names a key id that
+/// is not among them. Once keys have loaded, at most one fetch starts every 30 seconds.
+///
+/// A request for a key the authenticator holds does not wait for a fetch. After `ttl`, the
+/// keys stay in use until a fetch succeeds, also while the identity provider cannot be
+/// reached. A request for a key id the keys lack waits for the running fetch. A key that
+/// the identity provider starts to use less than 30 seconds after a fetch is accepted once
+/// the next fetch has run. Keys that cannot verify signatures, such as encryption keys and
+/// symmetric keys, are not used.
 ///
 /// Some `IdPs`, like Azure, use the `oid` field to identify users across applications.
 /// Set `subject_claim` to `oid` if you want to use this field as the subject.
@@ -88,7 +94,11 @@ impl JWKSWebAuthenticator {
     /// # Arguments
     /// - `idp_id`: The unique identifier of the IdP this authenticator is for. Use `None` for single tenant applications.
     /// - `issuer_url`: The URL of the `IdP` to fetch the JWKS keys from. Must provide a `/.well-known/openid-configuration` endpoint.
-    /// - `ttl`: How long fetched JWKS keys are used before they are fetched again. If `None`, one hour.
+    /// - `ttl`: After this time, the JWKS is fetched again in the background. If `None`, one hour. Below 30 seconds, it acts as 30 seconds.
+    ///
+    /// Also fetches the JWKS, which takes up to 10 seconds if the identity provider does not
+    /// answer. If that fetch fails, the authenticator starts without keys and fetches them
+    /// when a token needs one.
     ///
     /// # Errors
     /// - If the `issuer_url` is not a valid URL.
@@ -99,7 +109,7 @@ impl JWKSWebAuthenticator {
         Ok(Self {
             inner: std::sync::Arc::new(Inner {
                 idp_id: None,
-                keys: Arc::new(keys),
+                keys,
                 issuers: vec![issuer],
                 audiences: Vec::new(),
                 scope: None,
@@ -283,7 +293,7 @@ impl JWKSWebAuthenticator {
     async fn discover(
         issuer_url: &str,
         ttl: Option<Duration>,
-    ) -> Result<(KeyCache, String, url::Url)> {
+    ) -> Result<(Arc<KeyCache>, String, url::Url)> {
         let mut url = url::Url::parse(issuer_url)
             .inspect_err(|e| tracing::debug!("Failed to parse issuer url: {e}"))?;
         if !url.path().ends_with('/') {
@@ -324,7 +334,9 @@ impl JWKSWebAuthenticator {
                     source: e,
                 }
             })?;
-        let keys = KeyCache::new(http, config.jwks_uri, ttl);
+        let fetch = key_cache::http_fetch(http, config.jwks_uri.clone());
+        let keys = Arc::new(KeyCache::new(fetch, config.jwks_uri, ttl));
+        keys.prefetch().await;
         Ok((keys, config.issuer, url))
     }
 }
@@ -1514,6 +1526,23 @@ mod test {
             .route("/jwks", get(move || async move { Json(jwks) }));
         let handle = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         (issuer, handle)
+    }
+
+    /// A JWKS that cannot be fetched at startup does not fail the authenticator. Until a
+    /// fetch succeeds, tokens cannot be checked.
+    #[tokio::test]
+    async fn test_new_succeeds_when_the_jwks_cannot_be_fetched() {
+        let (enc, _) = ed25519_fixture();
+        let (issuer, server) = spawn_idp(serde_json::json!({ "not": "a JWKS" })).await;
+        let authenticator = JWKSWebAuthenticator::new(&issuer, None).await.unwrap();
+
+        let (token, _) = sign(&enc, serde_json::json!({ "iss": issuer, "sub": "u" }));
+        let err = authenticator
+            .authenticate(&token, &crate::introspect::introspect(&token))
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), crate::error::ErrorKind::Unavailable);
+        server.abort();
     }
 
     fn jwks_for(jwk: &serde_json::Value) -> serde_json::Value {
