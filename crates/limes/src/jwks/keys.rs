@@ -95,19 +95,28 @@ pub(super) fn prepare_key(value: serde_json::Value) -> Option<(String, Verificat
         );
         return None;
     };
-    match DecodingKey::from_jwk(&jwk) {
-        Ok(decoding_key) => Some((
-            kid,
-            VerificationKey {
-                decoding_key,
-                algorithm,
-            },
-        )),
+    let decoding_key = match DecodingKey::from_jwk(&jwk) {
+        Ok(decoding_key) => decoding_key,
         Err(e) => {
             tracing::debug!(kid, "Skipping a JWKS key that cannot be used: {e}");
-            None
+            return None;
         }
+    };
+    if algorithm.is_some_and(|algorithm| algorithm.family() != decoding_key.family()) {
+        tracing::debug!(
+            kid,
+            ?algorithm,
+            "Skipping a JWKS key whose algorithm does not fit its key type."
+        );
+        return None;
     }
+    Some((
+        kid,
+        VerificationKey {
+            decoding_key,
+            algorithm,
+        },
+    ))
 }
 
 #[cfg(test)]
@@ -164,6 +173,8 @@ mod test {
         unknown_algorithm["alg"] = serde_json::json!("XYZ");
         let mut broken = ed25519_jwk("broken");
         broken["x"] = serde_json::json!("not base64!");
+        let mut other_family = ed25519_jwk("other-family");
+        other_family["alg"] = serde_json::json!("RS256");
         let jwks = JwksDocument {
             keys: vec![
                 ed25519_jwk("k1"),
@@ -173,6 +184,7 @@ mod test {
                 verify_operation,
                 unknown_algorithm,
                 broken,
+                other_family,
                 serde_json::json!({ "kty": "oct", "kid": "symmetric", "alg": "HS256", "k": "c2VjcmV0" }),
                 serde_json::json!({ "kty": "RSA", "kid": "oaep", "alg": "RSA-OAEP", "n": "AQAB", "e": "AQAB" }),
                 serde_json::json!({ "kty": "unknown", "kid": "unknown-type" }),
@@ -198,10 +210,12 @@ mod test {
     fn test_parse_uses_the_first_usable_key_of_a_kid() {
         let mut encryption = ed25519_jwk("shared");
         encryption["use"] = serde_json::json!("enc");
+        let mut other_family = ed25519_jwk("shared");
+        other_family["alg"] = serde_json::json!("ES256");
         let (first, first_jwk) = ed25519_pair("shared");
         let (second, second_jwk) = ed25519_pair("shared");
         let keys = KeySet::parse(JwksDocument {
-            keys: vec![encryption, first_jwk, second_jwk],
+            keys: vec![encryption, other_family, first_jwk, second_jwk],
         });
         let key = keys.get("shared").unwrap();
         assert!(verifies(&key, &first));

@@ -6,7 +6,9 @@
 //! keys lack; requests for such a key id wait for that fetch. Once keys have loaded, at most
 //! one fetch starts per [`MIN_INTERVAL`], so tokens cannot make the cache fetch on every
 //! request, and a shorter TTL acts as the interval. Until keys have loaded, failed fetches
-//! are retried sooner.
+//! are retried sooner. A fetch that has not finished [`WAIT_LIMIT`] after it started is
+//! given up, so a fetch whose task does not run, for example on a runtime that no longer
+//! polls its tasks, holds neither requests nor the next fetch.
 
 use std::{
     future::Future,
@@ -27,6 +29,9 @@ const MIN_INTERVAL: Duration = Duration::from_secs(30);
 /// Until keys have loaded, the wait after a failed fetch. It doubles with each further
 /// failure, up to [`MIN_INTERVAL`].
 const COLD_BACKOFF: Duration = Duration::from_millis(250);
+/// How long after its start a fetch is given up. Longer than the timeout of the HTTP
+/// request, so only a fetch whose task does not run is given up.
+const WAIT_LIMIT: Duration = Duration::from_secs(20);
 
 /// Fetches the JWKS. Tests replace the HTTP request.
 pub(super) type Fetch = Arc<dyn Fn() -> FetchFuture + Send + Sync>;
@@ -75,6 +80,8 @@ enum Failure {
     Fetch(Arc<reqwest::Error>),
     /// The fetch ended before it finished: it panicked, or its runtime shut down.
     Interrupted,
+    /// The fetch had not finished [`WAIT_LIMIT`] after it started.
+    GivenUp,
 }
 
 impl Snapshot {
@@ -116,6 +123,14 @@ impl Trigger {
     }
 }
 
+/// A fetch that has started and not finished.
+#[derive(Clone, Copy)]
+struct Running {
+    id: u64,
+    started_at: Instant,
+    trigger: Trigger,
+}
+
 /// The keys of one JWKS endpoint.
 pub(super) struct KeyCache {
     fetch: Fetch,
@@ -123,8 +138,8 @@ pub(super) struct KeyCache {
     ttl: Duration,
     /// The current state. Requests wait on it for the outcome of a fetch.
     snapshot: watch::Sender<Arc<Snapshot>>,
-    /// The id of the running fetch; `None` while no fetch runs.
-    running: Mutex<Option<u64>>,
+    /// The running fetch; `None` while no fetch runs.
+    running: Mutex<Option<Running>>,
 }
 
 impl KeyCache {
@@ -142,8 +157,8 @@ impl KeyCache {
     /// Fetches the first keys. If that fails, the cache starts without keys and fetches
     /// again when a token needs a key.
     pub(super) async fn prefetch(self: &Arc<Self>) {
-        if let Some(id) = self.join_or_start_fetch(Trigger::Startup) {
-            self.outcome_of(id).await;
+        if let Some(fetch) = self.join_or_start_fetch(Trigger::Startup) {
+            self.outcome_of(fetch).await;
         }
     }
 
@@ -164,7 +179,7 @@ impl KeyCache {
             return Ok(key);
         }
         let current = match self.join_or_start_fetch(Trigger::UnknownKeyId) {
-            Some(id) => self.outcome_of(id).await,
+            Some(fetch) => self.outcome_of(fetch).await,
             None => self.current(),
         };
         self.answer(&current, kid)
@@ -186,6 +201,10 @@ impl KeyCache {
                 "Failed to fetch the JWKS",
                 "the fetch stopped unexpectedly",
             )),
+            Some(Failure::GivenUp) if current.fetched_at.is_none() => Err(Error::internal(
+                "Failed to fetch the JWKS",
+                "the fetch did not finish in time",
+            )),
             _ => Err(Error::unauthenticated("Token key id not found in JWKS.")),
         }
     }
@@ -194,16 +213,19 @@ impl KeyCache {
         Arc::clone(&self.snapshot.borrow())
     }
 
-    /// The id of the running fetch, or of a new one if none runs and one may start; `None`
-    /// otherwise.
-    fn join_or_start_fetch(self: &Arc<Self>, trigger: Trigger) -> Option<u64> {
-        let (id, started_at) = {
+    /// The running fetch, or a new one if none runs and one may start; `None` otherwise. A
+    /// running fetch older than [`WAIT_LIMIT`] is given up first.
+    fn join_or_start_fetch(self: &Arc<Self>, trigger: Trigger) -> Option<Running> {
+        let fetch = {
             let mut running = self.running.lock().unwrap_or_else(PoisonError::into_inner);
-            if let Some(id) = *running {
-                return Some(id);
+            let now = Instant::now();
+            if let Some(fetch) = *running {
+                if now.saturating_duration_since(fetch.started_at) < WAIT_LIMIT {
+                    return Some(fetch);
+                }
+                self.publish(&mut running, fetch, Err(Failure::GivenUp));
             }
             let current = self.current();
-            let now = Instant::now();
             if !current.may_fetch(now) {
                 tracing::trace!(
                     url = %self.jwks_uri,
@@ -213,41 +235,55 @@ impl KeyCache {
                 return None;
             }
             let id = current.attempt.as_ref().map_or(1, |a| a.id + 1);
-            *running = Some(id);
-            (id, now)
+            let fetch = Running {
+                id,
+                started_at: now,
+                trigger,
+            };
+            *running = Some(fetch);
+            fetch
         };
         let mut finish = Finish {
             cache: Arc::clone(self),
-            id,
-            started_at,
-            trigger,
+            id: fetch.id,
             finished: false,
         };
-        let fetch = (self.fetch)();
+        let future = (self.fetch)();
         tokio::spawn(async move {
-            let result = fetch.await;
+            let result = future.await;
             finish.finished = true;
-            finish.cache.finish(
-                id,
-                started_at,
-                trigger,
-                result.map_err(|e| Failure::Fetch(Arc::new(e))),
-            );
+            finish
+                .cache
+                .finish(finish.id, result.map_err(|e| Failure::Fetch(Arc::new(e))));
         });
-        Some(id)
+        Some(fetch)
     }
 
-    /// Publishes the outcome of fetch `id`.
-    fn finish(
+    /// Publishes the outcome of fetch `id`, unless it no longer runs: then it was given up,
+    /// and a later fetch may have published newer keys.
+    fn finish(&self, id: u64, outcome: std::result::Result<KeySet, Failure>) {
+        let mut running = self.running.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(fetch) = *running
+            && fetch.id == id
+        {
+            self.publish(&mut running, fetch, outcome);
+        }
+    }
+
+    /// Publishes the outcome of the running `fetch`, under the lock of `running`.
+    fn publish(
         &self,
-        id: u64,
-        started_at: Instant,
-        trigger: Trigger,
+        running: &mut Option<Running>,
+        fetch: Running,
         outcome: std::result::Result<KeySet, Failure>,
     ) {
         // Publish before clearing `running`: whoever finds no running fetch also finds its
         // outcome.
-        let mut running = self.running.lock().unwrap_or_else(PoisonError::into_inner);
+        let Running {
+            id,
+            started_at,
+            trigger,
+        } = fetch;
         let current = self.current();
         let url = &self.jwks_uri;
         let trigger = trigger.as_str();
@@ -266,6 +302,14 @@ impl KeyCache {
                     }
                     Failure::Interrupted => {
                         tracing::debug!(%url, trigger, "The JWKS fetch stopped before it finished.");
+                    }
+                    Failure::GivenUp => {
+                        tracing::warn!(
+                            %url,
+                            trigger,
+                            "Gave up on a JWKS fetch that did not finish within {} seconds.",
+                            WAIT_LIMIT.as_secs()
+                        );
                     }
                 }
                 (Arc::clone(&current.keys), current.fetched_at, Some(failure))
@@ -291,15 +335,18 @@ impl KeyCache {
         *running = None;
     }
 
-    /// The state once fetch `id` has finished.
-    async fn outcome_of(&self, id: u64) -> Arc<Snapshot> {
+    /// The state once `fetch` has finished, or once it was given up [`WAIT_LIMIT`] after it
+    /// started.
+    async fn outcome_of(&self, fetch: Running) -> Arc<Snapshot> {
         let mut receiver = self.snapshot.subscribe();
-        let finished = receiver
-            .wait_for(|s| s.attempt.as_ref().is_some_and(|a| a.id >= id))
-            .await;
-        match finished {
-            Ok(snapshot) => Arc::clone(&snapshot),
-            Err(_) => self.current(),
+        let finished = receiver.wait_for(|s| s.attempt.as_ref().is_some_and(|a| a.id >= fetch.id));
+        match tokio::time::timeout_at(fetch.started_at + WAIT_LIMIT, finished).await {
+            Ok(Ok(snapshot)) => Arc::clone(&snapshot),
+            Ok(Err(_)) => self.current(),
+            Err(_) => {
+                self.finish(fetch.id, Err(Failure::GivenUp));
+                self.current()
+            }
         }
     }
 }
@@ -310,17 +357,13 @@ impl KeyCache {
 struct Finish {
     cache: Arc<KeyCache>,
     id: u64,
-    started_at: Instant,
-    trigger: Trigger,
     finished: bool,
 }
 
 impl Drop for Finish {
     fn drop(&mut self) {
         if !self.finished {
-            let (id, started_at, trigger) = (self.id, self.started_at, self.trigger);
-            self.cache
-                .finish(id, started_at, trigger, Err(Failure::Interrupted));
+            self.cache.finish(self.id, Err(Failure::Interrupted));
         }
     }
 }
@@ -664,6 +707,58 @@ mod test {
         assert_eq!(idp.fetches(), 2);
     }
 
+    /// A fetch that has not finished in time, for example because its runtime no longer
+    /// polls its tasks, is given up: the next fetch can start, and the late outcome does not
+    /// take the place of the next fetch's.
+    #[tokio::test(start_paused = true)]
+    async fn test_fetch_that_does_not_finish_in_time_is_given_up() {
+        let idp = FakeIdp::new(Response::Keys(vec!["late"]));
+        idp.latency(WAIT_LIMIT + Duration::from_secs(10));
+        let cache = idp.cache(TTL);
+        let started = Instant::now();
+        let err = cache.get("k1").await.unwrap_err();
+        assert_eq!(started.elapsed(), WAIT_LIMIT);
+        assert_eq!(err.kind(), ErrorKind::Internal);
+
+        // The given-up fetch finishes while the next one runs.
+        idp.respond(Response::Keys(vec!["k1"]));
+        idp.latency(Duration::from_secs(15));
+        tokio::time::advance(COLD_BACKOFF).await;
+        cache.get("k1").await.unwrap();
+        assert!(cache.current().keys.get("late").is_none());
+        assert_eq!(idp.fetches(), 2);
+    }
+
+    /// A running fetch older than the wait limit is given up when a request would join it,
+    /// also by a request that does not wait: the next fetch starts after the interval.
+    #[tokio::test(start_paused = true)]
+    async fn test_known_key_after_the_ttl_gives_up_a_fetch_that_did_not_finish() {
+        let idp = FakeIdp::new(Response::Keys(vec!["k1"]));
+        let cache = idp.cache(MIN_INTERVAL);
+        cache.prefetch().await;
+        tokio::time::advance(MIN_INTERVAL).await;
+
+        idp.latency(Duration::from_secs(600));
+        let refresh_started = Instant::now();
+        cache.get("k1").await.unwrap();
+        settle().await;
+        assert_eq!(idp.fetches(), 2);
+
+        // Gives up the refresh; the next one may start the interval after it started.
+        idp.latency(Duration::ZERO);
+        idp.respond(Response::Keys(vec!["k1", "k2"]));
+        tokio::time::advance(WAIT_LIMIT).await;
+        cache.get("k1").await.unwrap();
+        settle().await;
+        assert_eq!(idp.fetches(), 2);
+
+        tokio::time::sleep_until(refresh_started + MIN_INTERVAL).await;
+        cache.get("k1").await.unwrap();
+        settle().await;
+        assert_eq!(idp.fetches(), 3);
+        cache.get("k2").await.unwrap();
+    }
+
     /// A fetch whose runtime shuts down ends for the other runtimes too: a request that
     /// waits for it gets an error, and a later request can fetch again.
     #[test]
@@ -685,12 +780,24 @@ mod test {
         });
         assert_eq!(idp.fetches(), 1);
 
+        let (joined_tx, joined_rx) = std::sync::mpsc::channel();
         let waiting = std::thread::spawn({
             let cache = Arc::clone(&cache);
-            move || runtime().block_on(async move { cache.get("k1").await })
+            move || {
+                runtime().block_on(async move {
+                    let mut request = std::pin::pin!(cache.get("k1"));
+                    // The first poll joins the running fetch and waits for its outcome.
+                    let pending = std::future::poll_fn(|cx| {
+                        std::task::Poll::Ready(request.as_mut().poll(cx).is_pending())
+                    })
+                    .await;
+                    assert!(pending, "the request did not wait for the fetch");
+                    joined_tx.send(()).unwrap();
+                    request.await
+                })
+            }
         });
-        // Long enough for the request to join the running fetch.
-        std::thread::sleep(Duration::from_millis(100));
+        joined_rx.recv().unwrap();
         drop(first);
         let err = waiting.join().unwrap().unwrap_err();
         assert_eq!(err.kind(), ErrorKind::Internal);
