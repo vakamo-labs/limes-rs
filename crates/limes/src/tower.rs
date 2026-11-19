@@ -29,6 +29,8 @@ use tower_service::Service;
 const GRPC_UNAUTHENTICATED: &str = "16";
 /// gRPC status code `INTERNAL`.
 const GRPC_INTERNAL: &str = "13";
+/// gRPC status code `UNAVAILABLE`.
+const GRPC_UNAVAILABLE: &str = "14";
 
 /// Layer that authenticates every request with an [`Authenticator`].
 ///
@@ -154,6 +156,11 @@ impl Rejection {
         grpc_status: GRPC_UNAUTHENTICATED,
         message: "Unauthenticated",
     };
+    const UNAVAILABLE: Self = Self {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        grpc_status: GRPC_UNAVAILABLE,
+        message: "Authentication service unavailable",
+    };
 
     /// A gRPC "trailers-only" response: HTTP 200 with the status in the headers.
     fn grpc_response(self) -> Response<Full<Bytes>> {
@@ -193,7 +200,23 @@ impl From<&Error> for Rejection {
                 grpc_status: GRPC_INTERNAL,
                 message: "Authentication failed with internal error",
             },
-            _ => Self::UNAUTHENTICATED,
+            // The identity provider or the Kubernetes API could not be reached: the token may
+            // well be valid, so the client should retry rather than discard it.
+            #[cfg(feature = "kubernetes")]
+            Error::KubernetesTokenReviewError(_) => Self::UNAVAILABLE,
+            #[cfg(feature = "jwks")]
+            Error::RefreshOpenIDWellKnownConfigError { .. } => Self::UNAVAILABLE,
+            #[cfg(feature = "kubernetes")]
+            Error::KubernetesConfigError(_) => Self::UNAUTHENTICATED,
+            #[cfg(feature = "jwks")]
+            Error::FetchOpenIDWellKnownConfigError { .. }
+            | Error::InvalidWellKnownConfig { .. }
+            | Error::JWTDecodeError { .. } => Self::UNAUTHENTICATED,
+            Error::InvalidSubject { .. }
+            | Error::Unauthenticated { .. }
+            | Error::InvalidScope { .. }
+            | Error::TokenRejected { .. }
+            | Error::UrlParseError(_) => Self::UNAUTHENTICATED,
         }
     }
 }
@@ -270,6 +293,11 @@ mod tests {
                 "unhandled" => Err(Error::NoAuthenticatorCanHandleToken),
                 "internal" => Err(Error::internal("boom", "boom")),
                 "" => panic!("empty token reached the authenticator"),
+                #[cfg(feature = "jwks")]
+                "unavailable" => Err(Error::RefreshOpenIDWellKnownConfigError {
+                    url: "https://idp.example".to_string(),
+                    reason: "connection refused".to_string(),
+                }),
                 _ => Err(Error::unauthenticated("bad token")),
             }
         }
@@ -408,6 +436,19 @@ mod tests {
             assert!(headers.contains_key("grpc-message"));
             assert!(body.is_empty());
         }
+    }
+
+    #[cfg(feature = "jwks")]
+    #[tokio::test]
+    async fn outage_is_unavailable() {
+        let (status, headers, body) = send(Some("Bearer unavailable"), None).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body, "Authentication service unavailable");
+        assert!(headers.get("grpc-status").is_none());
+
+        let (status, headers, _) = send(Some("Bearer unavailable"), Some("application/grpc")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers["grpc-status"], GRPC_UNAVAILABLE);
     }
 
     #[tokio::test]
