@@ -14,7 +14,7 @@
 //! with an HTTP status code.
 
 use crate::Authenticator;
-use crate::error::Error;
+use crate::error::{Error, ErrorKind};
 use bytes::Bytes;
 use http::{HeaderValue, Request, Response, StatusCode, header};
 use http_body_util::{Either, Full};
@@ -189,34 +189,21 @@ impl Rejection {
 
 impl From<&Error> for Rejection {
     fn from(error: &Error) -> Self {
-        match error {
-            Error::NoAuthenticatorCanHandleToken => Self {
-                status: StatusCode::UNAUTHORIZED,
-                grpc_status: GRPC_UNAUTHENTICATED,
-                message: "No authenticator can handle the token",
-            },
-            Error::InternalError { .. } => Self {
+        match error.kind() {
+            ErrorKind::Unauthenticated if matches!(error, Error::NoAuthenticatorCanHandleToken) => {
+                Self {
+                    status: StatusCode::UNAUTHORIZED,
+                    grpc_status: GRPC_UNAUTHENTICATED,
+                    message: "No authenticator can handle the token",
+                }
+            }
+            ErrorKind::Unauthenticated => Self::UNAUTHENTICATED,
+            ErrorKind::Unavailable => Self::UNAVAILABLE,
+            ErrorKind::Internal => Self {
                 status: StatusCode::INTERNAL_SERVER_ERROR,
                 grpc_status: GRPC_INTERNAL,
                 message: "Authentication failed with internal error",
             },
-            // The identity provider or the Kubernetes API could not be reached: the token may
-            // well be valid, so the client should retry rather than discard it.
-            #[cfg(feature = "kubernetes")]
-            Error::KubernetesTokenReviewError(_) => Self::UNAVAILABLE,
-            #[cfg(feature = "jwks")]
-            Error::RefreshOpenIDWellKnownConfigError { .. } => Self::UNAVAILABLE,
-            #[cfg(feature = "kubernetes")]
-            Error::KubernetesConfigError(_) => Self::UNAUTHENTICATED,
-            #[cfg(feature = "jwks")]
-            Error::FetchOpenIDWellKnownConfigError { .. }
-            | Error::InvalidWellKnownConfig { .. }
-            | Error::JWTDecodeError { .. } => Self::UNAUTHENTICATED,
-            Error::InvalidSubject { .. }
-            | Error::Unauthenticated { .. }
-            | Error::InvalidScope { .. }
-            | Error::TokenRejected { .. }
-            | Error::UrlParseError(_) => Self::UNAUTHENTICATED,
         }
     }
 }

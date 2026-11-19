@@ -140,4 +140,54 @@ impl Error {
             source: error.into(),
         }
     }
+
+    /// What this error means for the client that presented the token.
+    #[must_use]
+    pub fn kind(&self) -> ErrorKind {
+        match self {
+            // The API server refused this server's own request, for example because RBAC
+            // does not allow creating TokenReviews. Retrying does not help.
+            #[cfg(feature = "kubernetes")]
+            Self::KubernetesTokenReviewError(kube::Error::Api(status))
+                if (400..500).contains(&status.code) && status.code != 429 =>
+            {
+                ErrorKind::Internal
+            }
+            #[cfg(feature = "kubernetes")]
+            Self::KubernetesTokenReviewError(_) => ErrorKind::Unavailable,
+            #[cfg(feature = "jwks")]
+            Self::RefreshOpenIDWellKnownConfigError { .. }
+            | Self::FetchOpenIDWellKnownConfigError { .. } => ErrorKind::Unavailable,
+            #[cfg(feature = "kubernetes")]
+            Self::KubernetesConfigError(_) => ErrorKind::Internal,
+            #[cfg(feature = "jwks")]
+            Self::InvalidWellKnownConfig { .. } => ErrorKind::Internal,
+            #[cfg(feature = "jwks")]
+            Self::JWTDecodeError { .. } => ErrorKind::Unauthenticated,
+            Self::InternalError { .. } | Self::InvalidScope { .. } | Self::UrlParseError(_) => {
+                ErrorKind::Internal
+            }
+            Self::InvalidSubject { .. }
+            | Self::Unauthenticated { .. }
+            | Self::TokenRejected { .. }
+            | Self::NoAuthenticatorCanHandleToken => ErrorKind::Unauthenticated,
+        }
+    }
+}
+
+/// What an [`Error`] means for the client that presented the token, see [`Error::kind`].
+///
+/// A server answers [`Unauthenticated`](Self::Unauthenticated) with HTTP 401 / gRPC
+/// `UNAUTHENTICATED`, [`Unavailable`](Self::Unavailable) with 503 / `UNAVAILABLE`, and
+/// [`Internal`](Self::Internal) with 500 / `INTERNAL`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorKind {
+    /// The token is not accepted. Retrying with the same token does not help.
+    Unauthenticated,
+    /// A backend needed to check the token, such as the identity provider or the
+    /// Kubernetes API, could not be reached. The token may be valid; the client should
+    /// retry later and keep the token.
+    Unavailable,
+    /// This server is misconfigured or failed. Retrying does not help.
+    Internal,
 }

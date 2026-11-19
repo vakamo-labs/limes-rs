@@ -419,13 +419,12 @@ fn authenticate_jwt(
     required_claims: &[(String, ClaimRule)],
 ) -> Result<jsonwebtoken::TokenData<serde_json::Value>> {
     let mut validation = if let Some(alg) = key.alg() {
-        Validation::new(Algorithm::from_str(alg).map_err(|e| {
-            Error::internal(
-                format!(
-                    "Failed to parse algorithm `{alg}` from key obtained from the jwks endpoint."
-                ),
-                e,
-            )
+        // The token selects the key by its `kid`, so it can name a key that does not sign,
+        // such as an encryption key (`RSA-OAEP`) the IdP also publishes.
+        Validation::new(Algorithm::from_str(alg).map_err(|_| {
+            Error::unauthenticated(format!(
+                "Token names a JWKS key with algorithm `{alg}`, which cannot verify signatures."
+            ))
         })?)
     } else {
         // Some IdPs, like Azure, don't include the alg field in the jwks endpoint.
@@ -1618,6 +1617,36 @@ mod test {
             err.to_string(),
             "Authentication failed: Token key id not found in JWKS."
         );
+        server.abort();
+    }
+
+    /// A token can name any key the IdP publishes, including an encryption key.
+    #[tokio::test]
+    async fn test_token_naming_an_encryption_key_is_an_authentication_failure() {
+        let (enc, jwk) = ed25519_fixture();
+        let mut jwks = jwks_for(&jwk);
+        jwks["keys"].as_array_mut().unwrap().push(serde_json::json!({
+            "kty": "RSA", "use": "enc", "alg": "RSA-OAEP", "kid": "enc", "n": "AQAB", "e": "AQAB"
+        }));
+        let (issuer, server) = spawn_idp(jwks).await;
+        let authenticator = JWKSWebAuthenticator::new(&issuer, None).await.unwrap();
+        let mut header = Header::new(Algorithm::EdDSA);
+        header.kid = Some("enc".to_string());
+        let token = jsonwebtoken::encode(
+            &header,
+            &serde_json::json!({ "iss": issuer, "sub": "u", "exp": 9_999_999_999_i64 }),
+            &enc,
+        )
+        .unwrap();
+        let err = authenticator
+            .authenticate(&token, &crate::introspect::introspect(&token))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Authentication failed: Token names a JWKS key with algorithm `RSA-OAEP`, which cannot verify signatures."
+        );
+        assert_eq!(err.kind(), crate::error::ErrorKind::Unauthenticated);
         server.abort();
     }
 
