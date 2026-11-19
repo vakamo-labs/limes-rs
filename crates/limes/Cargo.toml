@@ -19,7 +19,7 @@ all-features = true
 [features]
 all = ["kubernetes", "rustls-tls", "jwks", "axum", "valuable"]
 default = ["rustls-tls", "jwks", "aws-lc-rs"]
-kubernetes = ["kube", "k8s-openapi"]
+kubernetes = ["kube", "k8s-openapi", "dep:tokio"]
 rustls-tls = ["kube?/rustls-tls", "reqwest/rustls"]
 aws-lc-rs = ["kube?/aws-lc-rs"]
 ring = ["kube?/ring"]
