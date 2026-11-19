@@ -281,9 +281,11 @@ mod tests {
                 "internal" => Err(Error::internal("boom", "boom")),
                 "" => panic!("empty token reached the authenticator"),
                 #[cfg(feature = "jwks")]
-                "unavailable" => Err(Error::RefreshOpenIDWellKnownConfigError {
+                "unavailable" => Err(Error::FetchJwksError {
                     url: "https://idp.example".to_string(),
-                    reason: "connection refused".to_string(),
+                    source: std::sync::Arc::new(
+                        reqwest::Client::new().get("not a url").build().unwrap_err(),
+                    ),
                 }),
                 _ => Err(Error::unauthenticated("bad token")),
             }

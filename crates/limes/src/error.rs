@@ -88,8 +88,12 @@ pub enum Error {
         source: reqwest::Error,
     },
     #[cfg(feature = "jwks")]
-    #[error("Failed to refresh openid configuration from {url}: {reason}")]
-    RefreshOpenIDWellKnownConfigError { url: String, reason: String },
+    #[error("Failed to fetch the JWKS from {url}: {source}")]
+    FetchJwksError {
+        url: String,
+        #[source]
+        source: std::sync::Arc<reqwest::Error>,
+    },
     #[cfg(feature = "jwks")]
     #[error("Failed to parse openid configuration. Expected fields: {expected_fields:?}")]
     InvalidWellKnownConfig {
@@ -156,8 +160,9 @@ impl Error {
             #[cfg(feature = "kubernetes")]
             Self::KubernetesTokenReviewError(_) => ErrorKind::Unavailable,
             #[cfg(feature = "jwks")]
-            Self::RefreshOpenIDWellKnownConfigError { .. }
-            | Self::FetchOpenIDWellKnownConfigError { .. } => ErrorKind::Unavailable,
+            Self::FetchJwksError { .. } | Self::FetchOpenIDWellKnownConfigError { .. } => {
+                ErrorKind::Unavailable
+            }
             #[cfg(feature = "kubernetes")]
             Self::KubernetesConfigError(_) => ErrorKind::Internal,
             #[cfg(feature = "jwks")]

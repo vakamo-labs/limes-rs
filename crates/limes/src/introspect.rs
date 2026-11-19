@@ -180,7 +180,7 @@ mod tests {
         let token = jsonwebtoken::encode(
             &Header::new(jsonwebtoken::Algorithm::HS256),
             &claims,
-            &jsonwebtoken::EncodingKey::from_secret(b"secret"),
+            &jsonwebtoken::EncodingKey::from_secret(b"secret").unwrap(),
         )
         .unwrap();
 

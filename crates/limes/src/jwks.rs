@@ -8,12 +8,18 @@ use crate::{
     error::RejectionReason,
     error::{Error, Result},
 };
-use jsonwebtoken::{Algorithm, DecodingKey, Header, Validation};
-use jwks_client_rs::source::WebSource;
-use jwks_client_rs::{JsonWebKey, JwksClient};
-use std::str::FromStr;
+use jsonwebtoken::{Header, Validation};
+use key_cache::KeyCache;
+use keys::VerificationKey;
 use std::sync::Arc;
 use std::time::Duration;
+
+mod key_cache;
+mod keys;
+
+/// Timeouts for requests to the identity provider.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 const SUBJECT_CLAIM: &str = "sub";
 const IDTYP_CLAIM: &str = "idtyp";
@@ -23,7 +29,6 @@ const AUD_CLAIM: &str = "aud";
 
 #[derive(Clone)]
 /// Validate JWT tokens using JWKS keys fetched from a remote server.
-/// Keys are refreshed regularly if `ttl` is set during initialization.
 ///
 /// If you don't want to validate the audience, pass an empty slice for `audiences`.
 /// Audience check passes if the token audience is among the provided audiences.
@@ -37,9 +42,10 @@ const AUD_CLAIM: &str = "aud";
 ///
 /// If `scope` is provided, the token must contain the provided scope.
 ///
-/// If `ttl` is provided, the JWKS keys will be cached for the provided duration.
-/// Otherwise, the keys will be cached indefinitely. We recommend setting a TTL, as
-/// the keys may change over time.
+/// The JWKS is fetched when a token needs a key, and again when the keys are older than
+/// `ttl` (one hour if `ttl` is `None`) or a token names a key id that is not among them.
+/// If a fetch fails, the keys of the previous fetch stay in use. Keys that cannot verify
+/// signatures, such as encryption keys and symmetric keys, are not used.
 ///
 /// Some `IdPs`, like Azure, use the `oid` field to identify users across applications.
 /// Set `subject_claim` to `oid` if you want to use this field as the subject.
@@ -64,7 +70,7 @@ pub struct JWKSWebAuthenticator {
 struct Inner {
     idp_id: Option<String>,
     audiences: Vec<String>,
-    client: JwksClient<WebSource>,
+    keys: Arc<KeyCache>,
     issuers: Vec<String>,
     scope: Option<ScopeRule>,
     required_claims: Vec<(String, ClaimRule)>,
@@ -82,19 +88,18 @@ impl JWKSWebAuthenticator {
     /// # Arguments
     /// - `idp_id`: The unique identifier of the IdP this authenticator is for. Use `None` for single tenant applications.
     /// - `issuer_url`: The URL of the `IdP` to fetch the JWKS keys from. Must provide a `/.well-known/openid-configuration` endpoint.
-    /// - `ttl`: The time to live for the JWKS keys. If `None`, the keys will be cached indefinitely (not recommended).
+    /// - `ttl`: How long fetched JWKS keys are used before they are fetched again. If `None`, one hour.
     ///
     /// # Errors
     /// - If the `issuer_url` is not a valid URL.
     /// - If the `issuer_url` does not provide a `/.well-known/openid-configuration` endpoint.
     /// - If the fetched configuration does not contain the required fields.
     pub async fn new(issuer_url: &str, ttl: Option<Duration>) -> Result<Self> {
-        let (client, issuer, config_url) =
-            JWKSWebAuthenticator::initialize_client(issuer_url, ttl).await?;
+        let (keys, issuer, config_url) = JWKSWebAuthenticator::discover(issuer_url, ttl).await?;
         Ok(Self {
             inner: std::sync::Arc::new(Inner {
                 idp_id: None,
-                client,
+                keys: Arc::new(keys),
                 issuers: vec![issuer],
                 audiences: Vec::new(),
                 scope: None,
@@ -274,10 +279,11 @@ impl JWKSWebAuthenticator {
         self
     }
 
-    async fn initialize_client(
+    /// Reads the provider's `.well-known` configuration: the issuer, and where its keys are.
+    async fn discover(
         issuer_url: &str,
         ttl: Option<Duration>,
-    ) -> Result<(JwksClient<WebSource>, String, url::Url)> {
+    ) -> Result<(KeyCache, String, url::Url)> {
         let mut url = url::Url::parse(issuer_url)
             .inspect_err(|e| tracing::debug!("Failed to parse issuer url: {e}"))?;
         if !url.path().ends_with('/') {
@@ -296,41 +302,30 @@ impl JWKSWebAuthenticator {
             })?
         };
 
-        let config = Arc::new(
-            reqwest::get(url.clone())
-                .await
-                .map_err(|e| Error::FetchOpenIDWellKnownConfigError {
-                    url: url.to_string(),
-                    source: e,
-                })?
-                .json::<WellKnownConfig>()
-                .await
-                .map_err(|e| {
-                    tracing::debug!("Failed to parse openid configuration: {e}");
-                    Error::InvalidWellKnownConfig {
-                        expected_fields: &["jwks_uri", "issuer"],
-                        source: e,
-                    }
-                })?,
-        );
-        let issuer = config.issuer.clone();
-        let source = WebSource::builder()
-            .build(config.jwks_uri.clone())
+        let http = reqwest::Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .map_err(|e| Error::internal("Failed to build the HTTP client", e))?;
+        let config = http
+            .get(url.clone())
+            .send()
+            .await
+            .map_err(|e| Error::FetchOpenIDWellKnownConfigError {
+                url: url.to_string(),
+                source: e,
+            })?
+            .json::<WellKnownConfig>()
+            .await
             .map_err(|e| {
-                tracing::debug!("Failed to fetch openid configuration from '{url}': {e}");
-                Error::FetchOpenIDWellKnownConfigError {
-                    url: url.to_string(),
+                tracing::debug!("Failed to parse openid configuration: {e}");
+                Error::InvalidWellKnownConfig {
+                    expected_fields: &["jwks_uri", "issuer"],
                     source: e,
                 }
             })?;
-        let client = JwksClient::builder();
-        let client = if let Some(ttl) = ttl {
-            client.time_to_live(ttl)
-        } else {
-            client
-        };
-        let client = client.build(source);
-        Ok((client, issuer, url))
+        let keys = KeyCache::new(http, config.jwks_uri, ttl);
+        Ok((keys, config.issuer, url))
     }
 }
 
@@ -349,22 +344,7 @@ impl Authenticator for JWKSWebAuthenticator {
         let key_id = header.kid.as_deref().ok_or_else(|| Error::JWTDecodeError {
             reason: "Token does not contain a key id".to_string(),
         })?;
-        let key = self.inner.client.get(key_id).await.map_err(|e| {
-            // `jwks_client_rs` keeps its error enum private, so `KeyNotFound` — the token
-            // names a key the IdP does not publish — is only recognizable by its message
-            // ("Cannot find key for key_id: …"). That case is an authentication failure of
-            // this token, not an IdP problem; the attacker-controlled key id is not
-            // reproduced in the error. A future message change degrades only the error
-            // classification, never admits a token.
-            if e.to_string().starts_with("Cannot find key for key_id") {
-                Error::unauthenticated("Token key id not found in JWKS.")
-            } else {
-                Error::RefreshOpenIDWellKnownConfigError {
-                    url: self.inner.config_url.to_string(),
-                    reason: e.to_string(),
-                }
-            }
-        })?;
+        let key = self.inner.keys.get(key_id).await?;
         let token_data = authenticate_jwt(
             token,
             header,
@@ -412,25 +392,15 @@ impl Authenticator for JWKSWebAuthenticator {
 fn authenticate_jwt(
     token: &str,
     header: &Header,
-    key: &JsonWebKey,
+    key: &VerificationKey,
     audiences: &[String],
     issuers: &[String],
     scope: Option<&ScopeRule>,
     required_claims: &[(String, ClaimRule)],
 ) -> Result<jsonwebtoken::TokenData<serde_json::Value>> {
-    let mut validation = if let Some(alg) = key.alg() {
-        // The token selects the key by its `kid`, so it can name a key that does not sign,
-        // such as an encryption key (`RSA-OAEP`) the IdP also publishes.
-        Validation::new(Algorithm::from_str(alg).map_err(|_| {
-            Error::unauthenticated(format!(
-                "Token names a JWKS key with algorithm `{alg}`, which cannot verify signatures."
-            ))
-        })?)
-    } else {
-        // Some IdPs, like Azure, don't include the alg field in the jwks endpoint.
-        // In this case we trust the provided algorithm in the clients token.
-        Validation::new(header.alg)
-    };
+    // Some IdPs, like Azure, don't include the alg field in the jwks endpoint.
+    // In this case we trust the provided algorithm in the clients token.
+    let mut validation = Validation::new(key.algorithm.unwrap_or(header.alg));
 
     // jsonwebtoken checks `aud`/`iss` only when the claim parses; requiring them makes an
     // absent or malformed claim a rejection instead of a pass.
@@ -447,23 +417,14 @@ fn authenticate_jwt(
     // `nbf` is not yet valid. An absent `nbf` stays acceptable.
     validation.validate_nbf = true;
 
-    let decoding_key = match key {
-        JsonWebKey::Rsa(jwk) => DecodingKey::from_rsa_components(jwk.modulus(), jwk.exponent())
-            .map_err(|e| {
-                Error::internal("Failed to create rsa decoding key from key components.", e)
-            })?,
-        JsonWebKey::Ec(jwk) => DecodingKey::from_ec_components(jwk.x(), jwk.y()).map_err(|e| {
-            Error::internal("Failed to create ec decoding key from key components.", e)
-        })?,
-        JsonWebKey::Okp(jwk) => DecodingKey::from_ed_components(jwk.x()).map_err(|e| {
-            Error::internal("Failed to create okp decoding key from key components.", e)
-        })?,
-    };
-
     // jsonwebtoken verifies the signature before validating claims, so audience and
     // issuer failures are rejections of a genuine token; everything else is unverifiable.
-    let token_data = jsonwebtoken::decode::<serde_json::Value>(token, &decoding_key, &validation)
-        .map_err(|e| match e.kind() {
+    let token_data = jsonwebtoken::decode::<serde_json::Value>(
+        token,
+        &key.decoding_key,
+        &validation,
+    )
+    .map_err(|e| match e.kind() {
         jsonwebtoken::errors::ErrorKind::InvalidAudience => {
             tracing::debug!(accepted_audiences = ?audiences, "Token audience rejected: {e}");
             Error::rejected(RejectionReason::AudienceMismatch)
@@ -701,7 +662,7 @@ impl std::fmt::Debug for JWKSWebAuthenticator {
             )
             .field("config_url", &self.inner.config_url)
             .field("subject_claim", &self.inner.subject_claim)
-            .field("client", &"jwks_client_rs::JwksClient<WebSource>")
+            .field("keys", &self.inner.keys)
             .field("role_claims", &self.inner.role_claims)
             .field("display_name_template", &self.inner.display_name_template)
             .finish()
@@ -912,22 +873,22 @@ impl ScopeRule {
 #[cfg(test)]
 mod test {
     use super::*;
+    use jsonwebtoken::Algorithm;
     use pretty_assertions::assert_eq;
     use std::collections::HashSet;
 
     // ---- signed-token fixtures ----
 
-    fn ed25519_fixture() -> (jsonwebtoken::EncodingKey, JsonWebKey) {
+    fn ed25519_fixture() -> (jsonwebtoken::EncodingKey, serde_json::Value) {
         use base64::Engine as _;
         let key_pair = aws_lc_rs::signature::Ed25519KeyPair::generate().unwrap();
         let pkcs8 = key_pair.to_pkcs8().unwrap();
         let encoding_key = jsonwebtoken::EncodingKey::from_ed_der(pkcs8.as_ref());
         let x = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(aws_lc_rs::signature::KeyPair::public_key(&key_pair).as_ref());
-        let jwk: JsonWebKey = serde_json::from_value(serde_json::json!({
+        let jwk = serde_json::json!({
             "kty": "OKP", "crv": "Ed25519", "alg": "EdDSA", "kid": "k1", "x": x
-        }))
-        .unwrap();
+        });
         (encoding_key, jwk)
     }
 
@@ -970,25 +931,26 @@ mod test {
     }
 
     fn verify(
-        key: &JsonWebKey,
+        jwk: &serde_json::Value,
         token: &str,
         header: &Header,
         rules: &[(String, ClaimRule)],
     ) -> Result<jsonwebtoken::TokenData<serde_json::Value>> {
-        verify_with_scope(key, token, header, None, rules)
+        verify_with_scope(jwk, token, header, None, rules)
     }
 
     fn verify_with_scope(
-        key: &JsonWebKey,
+        jwk: &serde_json::Value,
         token: &str,
         header: &Header,
         scope: Option<&ScopeRule>,
         rules: &[(String, ClaimRule)],
     ) -> Result<jsonwebtoken::TokenData<serde_json::Value>> {
+        let (_, key) = keys::prepare_key(jwk.clone()).unwrap();
         authenticate_jwt(
             token,
             header,
-            key,
+            &key,
             &[AUD.to_string()],
             &[ISS.to_string()],
             scope,
@@ -1077,8 +1039,9 @@ mod test {
     fn test_authenticate_jwt_accepts_token_without_aud_when_no_audience_configured() {
         let (enc, jwk) = ed25519_fixture();
         let (token, header) = sign(&enc, serde_json::json!({ "iss": ISS, "sub": "u" }));
+        let (_, key) = keys::prepare_key(jwk).unwrap();
         let data =
-            authenticate_jwt(&token, &header, &jwk, &[], &[ISS.to_string()], None, &[]).unwrap();
+            authenticate_jwt(&token, &header, &key, &[], &[ISS.to_string()], None, &[]).unwrap();
         assert_eq!(data.claims["sub"], "u");
     }
 
@@ -1263,17 +1226,39 @@ mod test {
         let enc = jsonwebtoken::EncodingKey::from_ed_der(pkcs8.as_ref());
         let x = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(aws_lc_rs::signature::KeyPair::public_key(&key_pair).as_ref());
-        let jwk: JsonWebKey = serde_json::from_value(serde_json::json!({
-            "kty": "OKP", "crv": "Ed25519", "kid": "k1", "x": x
-        }))
-        .unwrap();
-        assert_eq!(jwk.alg(), None);
+        let jwk = serde_json::json!({ "kty": "OKP", "crv": "Ed25519", "kid": "k1", "x": x });
         let (token, header) = sign(
             &enc,
             serde_json::json!({ "iss": ISS, "aud": AUD, "sub": "u" }),
         );
         let data = verify(&jwk, &token, &header, &[]).unwrap();
         assert_eq!(data.claims["sub"], "u");
+    }
+
+    #[test]
+    fn test_authenticate_jwt_uses_the_algorithm_the_jwks_names() {
+        let (enc, jwk) = ed25519_fixture();
+        let (token, header) = sign(
+            &enc,
+            serde_json::json!({ "iss": ISS, "aud": AUD, "sub": "u" }),
+        );
+        let (_, mut key) = keys::prepare_key(jwk).unwrap();
+        // The JWKS names another algorithm than the token's header.
+        key.algorithm = Some(Algorithm::ES256);
+        let err = authenticate_jwt(
+            &token,
+            &header,
+            &key,
+            &[AUD.to_string()],
+            &[ISS.to_string()],
+            None,
+            &[],
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Failed to decode JWT Token. Failed to decode JWT token. InvalidAlgorithm"
+        );
     }
 
     // ---- scope sugar ----
@@ -1531,13 +1516,8 @@ mod test {
         (issuer, handle)
     }
 
-    fn jwks_for(jwk: &JsonWebKey) -> serde_json::Value {
-        let JsonWebKey::Okp(okp) = jwk else {
-            unreachable!("fixture is OKP")
-        };
-        serde_json::json!({ "keys": [
-            { "kty": "OKP", "crv": "Ed25519", "alg": "EdDSA", "kid": "k1", "x": okp.x() }
-        ]})
+    fn jwks_for(jwk: &serde_json::Value) -> serde_json::Value {
+        serde_json::json!({ "keys": [jwk] })
     }
 
     /// Without a chain there is no `can_handle_token` routing: a token that omits `aud`
@@ -1594,8 +1574,7 @@ mod test {
         server.abort();
     }
 
-    /// `limes` classifies an unknown key id by the message `jwks_client_rs` produces, so a
-    /// change to that message must fail here rather than silently reclassify the error.
+    /// A token naming a key the IdP does not publish fails to authenticate; the IdP is fine.
     #[tokio::test]
     async fn test_unknown_key_id_is_an_authentication_failure() {
         let (enc, jwk) = ed25519_fixture();
@@ -1617,10 +1596,12 @@ mod test {
             err.to_string(),
             "Authentication failed: Token key id not found in JWKS."
         );
+        assert_eq!(err.kind(), crate::error::ErrorKind::Unauthenticated);
         server.abort();
     }
 
-    /// A token can name any key the IdP publishes, including an encryption key.
+    /// A token can name any key the IdP publishes, including an encryption key, which is
+    /// not used to verify signatures.
     #[tokio::test]
     async fn test_token_naming_an_encryption_key_is_an_authentication_failure() {
         let (enc, jwk) = ed25519_fixture();
@@ -1644,7 +1625,7 @@ mod test {
             .unwrap_err();
         assert_eq!(
             err.to_string(),
-            "Authentication failed: Token names a JWKS key with algorithm `RSA-OAEP`, which cannot verify signatures."
+            "Authentication failed: Token key id not found in JWKS."
         );
         assert_eq!(err.kind(), crate::error::ErrorKind::Unauthenticated);
         server.abort();
