@@ -74,6 +74,13 @@ pub enum ClaimRuleError {
         operator: &'static str,
         value: String,
     },
+    /// Denies only. A literal made of whitespace delimits values only by that exact text, so
+    /// the deny admits a banned value delimited by other whitespace, such as a tab.
+    /// [`Separator::Whitespace`] finds every value the literal finds, and those too.
+    #[error(
+        "none_of with a whitespace literal separator misses values delimited by other whitespace; use the whitespace separator"
+    )]
+    WhitespaceLiteralOnDeny,
 }
 
 /// A validated rule over one claim.
@@ -179,8 +186,10 @@ impl ClaimRule {
     /// in any item. See [`Separator`].
     ///
     /// # Errors
-    /// [`ClaimRuleError::EmptySeparator`], or [`ClaimRuleError::ValueContainsSeparator`] if a
-    /// *grant* lists a value containing the separator, which no split piece can equal.
+    /// [`ClaimRuleError::EmptySeparator`], [`ClaimRuleError::ValueContainsSeparator`] if a
+    /// *grant* lists a value containing the separator, which no split piece can equal, or
+    /// [`ClaimRuleError::WhitespaceLiteralOnDeny`] if a *deny* gets a literal made of
+    /// whitespace.
     pub fn with_separator(self, separator: Separator) -> Result<Self, ClaimRuleError> {
         Self::new_with_claims(self.claims, Some(separator), self.operator)
     }
@@ -200,6 +209,11 @@ impl ClaimRule {
     ) -> Result<Self, ClaimRuleError> {
         if matches!(&separator, Some(Separator::Literal(literal)) if literal.is_empty()) {
             return Err(ClaimRuleError::EmptySeparator);
+        }
+        if matches!(operator, ClaimOperator::NoneOf(_))
+            && matches!(&separator, Some(Separator::Literal(literal)) if literal.chars().all(char::is_whitespace))
+        {
+            return Err(ClaimRuleError::WhitespaceLiteralOnDeny);
         }
         let (name, values) = match &operator {
             ClaimOperator::AnyOf(v) => ("any_of", Some(v)),
@@ -781,6 +795,33 @@ mod tests {
                 .unwrap_err(),
             ClaimRuleError::EmptySeparator
         );
+    }
+
+    #[test]
+    fn deny_rejects_whitespace_literal_separator() {
+        for literal in [" ", "\t", "  ", "\u{a0}"] {
+            assert_eq!(
+                rule("c", none_of(&["admin"]))
+                    .with_separator(Separator::Literal(literal.into()))
+                    .unwrap_err(),
+                ClaimRuleError::WhitespaceLiteralOnDeny,
+                "{literal:?}"
+            );
+        }
+        // A grant with a whitespace literal can only grant less, so it is accepted.
+        assert!(
+            rule("c", any_of(&["admin"]))
+                .with_separator(Separator::Literal(" ".into()))
+                .is_ok()
+        );
+        // A literal that contains whitespace next to other text is exact on purpose.
+        assert!(
+            rule("c", none_of(&["admin"]))
+                .with_separator(Separator::Literal(", ".into()))
+                .is_ok()
+        );
+        let r = rule_sep("c", Separator::Whitespace, none_of(&["admin"]));
+        assert!(!r.matches(&json!({ "c": "openid\tadmin" })));
     }
 
     #[test]
