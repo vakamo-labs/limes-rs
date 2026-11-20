@@ -84,6 +84,25 @@ enum Failure {
     GivenUp,
 }
 
+impl Failure {
+    /// The source of the [`Error::FetchJwksError`] that requests get.
+    fn into_source(self) -> Arc<dyn std::error::Error + Send + Sync> {
+        match self {
+            Self::Fetch(error) => error,
+            Self::Interrupted => Arc::new(std::io::Error::other(
+                "the fetch stopped before it finished",
+            )),
+            Self::GivenUp => Arc::new(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!(
+                    "the fetch did not finish within {} seconds",
+                    WAIT_LIMIT.as_secs()
+                ),
+            )),
+        }
+    }
+}
+
 impl Snapshot {
     fn is_expired(&self, ttl: Duration) -> bool {
         self.fetched_at.is_none_or(|at| at.elapsed() >= ttl)
@@ -168,8 +187,8 @@ impl KeyCache {
     /// background. For a `kid` the keys lack, the request waits for the running fetch, or
     /// starts one unless the latest started less than [`MIN_INTERVAL`] ago.
     ///
-    /// A `kid` the keys lack is the token's fault, unless keys have never loaded: then the
-    /// keys are unavailable.
+    /// A `kid` the keys lack is the token's fault, unless the latest fetch failed: then the
+    /// `kid` may be new, and the keys are unavailable.
     pub(super) async fn get(self: &Arc<Self>, kid: &str) -> Result<Arc<VerificationKey>> {
         let current = self.current();
         if let Some(key) = current.keys.get(kid) {
@@ -189,29 +208,12 @@ impl KeyCache {
         if let Some(key) = current.keys.get(kid) {
             return Ok(key);
         }
-        let failure = current.attempt.as_ref().and_then(|a| a.failure.clone());
-        match failure {
-            Some(Failure::Fetch(source)) if current.fetched_at.is_none() => {
-                Err(Error::FetchJwksError {
-                    url: self.jwks_uri.to_string(),
-                    source,
-                })
-            }
-            Some(Failure::Interrupted) if current.fetched_at.is_none() => Err(Error::internal(
-                "Failed to fetch the JWKS",
-                "the fetch stopped unexpectedly",
-            )),
-            Some(Failure::GivenUp) if current.fetched_at.is_none() => Err(Error::FetchJwksError {
+        match current.attempt.as_ref().and_then(|a| a.failure.clone()) {
+            None => Err(Error::unauthenticated("Token key id not found in JWKS.")),
+            Some(failure) => Err(Error::FetchJwksError {
                 url: self.jwks_uri.to_string(),
-                source: Arc::new(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    format!(
-                        "the fetch did not finish within {} seconds",
-                        WAIT_LIMIT.as_secs()
-                    ),
-                )),
+                source: failure.into_source(),
             }),
-            _ => Err(Error::unauthenticated("Token key id not found in JWKS.")),
         }
     }
 
@@ -660,10 +662,10 @@ mod test {
         cache.get("k1").await.unwrap();
         settle().await;
         cache.get("k1").await.unwrap();
-        // Keys did load before, so an unknown key id is the token's fault.
+        // The latest fetch failed, so an unknown key id may be new.
         assert_eq!(
-            cache.get("k2").await.unwrap_err().to_string(),
-            UNAUTHENTICATED
+            cache.get("k2").await.unwrap_err().kind(),
+            ErrorKind::Unavailable
         );
         assert_eq!(idp.fetches(), 2);
 
@@ -675,6 +677,29 @@ mod test {
         tokio::time::advance(Duration::from_millis(1)).await;
         cache.get("k1").await.unwrap();
         settle().await;
+        assert_eq!(idp.fetches(), 3);
+    }
+
+    /// A key id that a failed fetch was to look up may be new, for example during a key
+    /// rotation; once a fetch succeeds without it, it is the token's fault.
+    #[tokio::test(start_paused = true)]
+    async fn test_unknown_key_id_is_unavailable_until_a_fetch_succeeds() {
+        let idp = FakeIdp::new(Response::Keys(vec!["k1"]));
+        let cache = idp.cache(TTL);
+        cache.prefetch().await;
+        tokio::time::advance(MIN_INTERVAL).await;
+
+        idp.respond(Response::Fail);
+        let err = cache.get("k2").await.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::Unavailable);
+        assert_eq!(idp.fetches(), 2);
+
+        idp.respond(Response::Keys(vec!["k1"]));
+        tokio::time::advance(MIN_INTERVAL).await;
+        assert_eq!(
+            cache.get("k2").await.unwrap_err().to_string(),
+            UNAUTHENTICATED
+        );
         assert_eq!(idp.fetches(), 3);
     }
 
@@ -702,10 +727,12 @@ mod test {
         let idp = FakeIdp::new(Response::Panic);
         let cache = idp.cache(TTL);
         cache.prefetch().await;
+        let err = cache.get("k1").await.unwrap_err();
         assert_eq!(
-            cache.get("k1").await.unwrap_err().kind(),
-            ErrorKind::Internal
+            err.to_string(),
+            "Failed to fetch the JWKS from https://idp.example/jwks: the fetch stopped before it finished"
         );
+        assert_eq!(err.kind(), ErrorKind::Unavailable);
 
         idp.respond(Response::Keys(vec!["k1"]));
         tokio::time::advance(COLD_BACKOFF).await;
@@ -810,7 +837,7 @@ mod test {
         joined_rx.recv().unwrap();
         drop(first);
         let err = waiting.join().unwrap().unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::Internal);
+        assert_eq!(err.kind(), ErrorKind::Unavailable);
 
         idp.latency(Duration::ZERO);
         runtime().block_on(async {

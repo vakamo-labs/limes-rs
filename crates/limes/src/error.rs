@@ -87,9 +87,9 @@ pub enum Error {
         #[source]
         source: reqwest::Error,
     },
-    /// No keys have loaded yet, and the latest fetch of the JWKS failed. The source is a
-    /// [`reqwest::Error`], or an [`std::io::Error`] of kind `TimedOut` if the fetch did not
-    /// finish in time.
+    /// The keys lack the token's key id, and the latest fetch of the JWKS failed. The source
+    /// is a [`reqwest::Error`], or an [`std::io::Error`] if the fetch did not finish in time
+    /// (kind `TimedOut`) or stopped before it finished.
     #[cfg(feature = "jwks")]
     #[error("Failed to fetch the JWKS from {url}: {source}")]
     FetchJwksError {
