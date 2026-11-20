@@ -87,9 +87,16 @@ pub enum Error {
         #[source]
         source: reqwest::Error,
     },
+    /// The keys lack the token's key id, and the latest fetch of the JWKS failed. The source
+    /// is a [`reqwest::Error`], or an [`std::io::Error`] if the fetch did not finish in time
+    /// (kind `TimedOut`) or stopped before it finished.
     #[cfg(feature = "jwks")]
-    #[error("Failed to refresh openid configuration from {url}: {reason}")]
-    RefreshOpenIDWellKnownConfigError { url: String, reason: String },
+    #[error("Failed to fetch the JWKS from {url}: {source}")]
+    FetchJwksError {
+        url: String,
+        #[source]
+        source: std::sync::Arc<dyn std::error::Error + Send + Sync>,
+    },
     #[cfg(feature = "jwks")]
     #[error("Failed to parse openid configuration. Expected fields: {expected_fields:?}")]
     InvalidWellKnownConfig {
@@ -156,8 +163,9 @@ impl Error {
             #[cfg(feature = "kubernetes")]
             Self::KubernetesTokenReviewError(_) => ErrorKind::Unavailable,
             #[cfg(feature = "jwks")]
-            Self::RefreshOpenIDWellKnownConfigError { .. }
-            | Self::FetchOpenIDWellKnownConfigError { .. } => ErrorKind::Unavailable,
+            Self::FetchJwksError { .. } | Self::FetchOpenIDWellKnownConfigError { .. } => {
+                ErrorKind::Unavailable
+            }
             #[cfg(feature = "kubernetes")]
             Self::KubernetesConfigError(_) => ErrorKind::Internal,
             #[cfg(feature = "jwks")]
