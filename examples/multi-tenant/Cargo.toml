@@ -1,6 +1,5 @@
 [package]
 name = "limes-example-multi-tenant"
-resolver = "2"
 version = "0.0.1"
 edition = { workspace = true }
 homepage = { workspace = true }

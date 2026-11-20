@@ -23,7 +23,7 @@ use super::keys::{JwksDocument, KeySet, VerificationKey};
 use crate::error::{Error, Result};
 
 /// How long keys are used before they are fetched again, if no TTL is configured.
-const DEFAULT_TTL: Duration = Duration::from_secs(60 * 60);
+const DEFAULT_TTL: Duration = Duration::from_hours(1);
 /// Once keys have loaded, the least time between the starts of two fetches.
 const MIN_INTERVAL: Duration = Duration::from_secs(30);
 /// Until keys have loaded, the wait after a failed fetch. It doubles with each further
@@ -470,7 +470,7 @@ mod test {
         }
     }
 
-    const TTL: Duration = Duration::from_secs(300);
+    const TTL: Duration = Duration::from_mins(5);
 
     /// Runs `get(kid)` in a task of its own.
     fn spawn_get(
@@ -636,7 +636,7 @@ mod test {
         tokio::time::advance(TTL).await;
 
         idp.respond(Response::Keys(vec!["k1", "k2"]));
-        idp.latency(Duration::from_secs(60));
+        idp.latency(Duration::from_mins(1));
         let before = Instant::now();
         cache.get("k1").await.unwrap();
         cache.get("k1").await.unwrap();
@@ -645,7 +645,7 @@ mod test {
         assert_eq!(idp.fetches(), 2);
 
         // Once the background fetch has finished, its keys are used.
-        tokio::time::sleep(Duration::from_secs(60)).await;
+        tokio::time::sleep(Duration::from_mins(1)).await;
         settle().await;
         cache.get("k2").await.unwrap();
         assert_eq!(idp.fetches(), 2);
@@ -775,7 +775,7 @@ mod test {
         cache.prefetch().await;
         tokio::time::advance(MIN_INTERVAL).await;
 
-        idp.latency(Duration::from_secs(600));
+        idp.latency(Duration::from_mins(10));
         let refresh_started = Instant::now();
         cache.get("k1").await.unwrap();
         settle().await;
@@ -807,7 +807,7 @@ mod test {
                 .unwrap()
         };
         let idp = FakeIdp::new(Response::Keys(vec!["k1"]));
-        idp.latency(Duration::from_secs(60));
+        idp.latency(Duration::from_mins(1));
         let cache = idp.cache(TTL);
 
         let first = runtime();
@@ -928,7 +928,7 @@ mod test {
 
     #[tokio::test]
     async fn test_timed_out_http_fetch_is_unavailable() {
-        let (uri, _server) = serve(Some(jwks(&["k1"])), Duration::from_secs(60)).await;
+        let (uri, _server) = serve(Some(jwks(&["k1"])), Duration::from_mins(1)).await;
         let http = reqwest::Client::builder()
             .timeout(Duration::from_millis(100))
             .build()
