@@ -6,9 +6,9 @@
 //! keys lack; requests for such a key id wait for that fetch. Once keys have loaded, at most
 //! one fetch starts per [`MIN_INTERVAL`], so tokens cannot make the cache fetch on every
 //! request, and a shorter TTL acts as the interval. Until keys have loaded, failed fetches
-//! are retried sooner. A fetch that has not finished [`WAIT_LIMIT`] after it started is
-//! given up, so a fetch whose task does not run, for example on a runtime that no longer
-//! polls its tasks, holds neither requests nor the next fetch.
+//! are retried sooner. A request that finds a fetch still running [`WAIT_LIMIT`] after it
+//! started gives the fetch up, so a fetch whose task does not run, for example on a
+//! runtime that no longer polls its tasks, holds neither requests nor the next fetch.
 
 use std::{
     future::Future,
@@ -29,8 +29,8 @@ const MIN_INTERVAL: Duration = Duration::from_secs(30);
 /// Until keys have loaded, the wait after a failed fetch. It doubles with each further
 /// failure, up to [`MIN_INTERVAL`].
 const COLD_BACKOFF: Duration = Duration::from_millis(250);
-/// How long after its start a fetch is given up. Longer than the timeout of the HTTP
-/// request, so only a fetch whose task does not run is given up.
+/// How long after its start a fetch may run before a request gives it up. Longer than the
+/// timeout of the HTTP request, so only a fetch whose task does not run is given up.
 const WAIT_LIMIT: Duration = Duration::from_secs(20);
 
 /// Fetches the JWKS. Tests replace the HTTP request.
@@ -201,10 +201,16 @@ impl KeyCache {
                 "Failed to fetch the JWKS",
                 "the fetch stopped unexpectedly",
             )),
-            Some(Failure::GivenUp) if current.fetched_at.is_none() => Err(Error::internal(
-                "Failed to fetch the JWKS",
-                "the fetch did not finish in time",
-            )),
+            Some(Failure::GivenUp) if current.fetched_at.is_none() => Err(Error::FetchJwksError {
+                url: self.jwks_uri.to_string(),
+                source: Arc::new(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!(
+                        "the fetch did not finish within {} seconds",
+                        WAIT_LIMIT.as_secs()
+                    ),
+                )),
+            }),
             _ => Err(Error::unauthenticated("Token key id not found in JWKS.")),
         }
     }
@@ -718,7 +724,11 @@ mod test {
         let started = Instant::now();
         let err = cache.get("k1").await.unwrap_err();
         assert_eq!(started.elapsed(), WAIT_LIMIT);
-        assert_eq!(err.kind(), ErrorKind::Internal);
+        assert_eq!(
+            err.to_string(),
+            "Failed to fetch the JWKS from https://idp.example/jwks: the fetch did not finish within 20 seconds"
+        );
+        assert_eq!(err.kind(), ErrorKind::Unavailable);
 
         // The given-up fetch finishes while the next one runs.
         idp.respond(Response::Keys(vec!["k1"]));
@@ -884,6 +894,7 @@ mod test {
         let Error::FetchJwksError { source, .. } = &err else {
             panic!("expected a fetch error, got {err:?}");
         };
+        let source = source.downcast_ref::<reqwest::Error>().unwrap();
         assert!(source.is_decode(), "{source:?}");
         assert_eq!(err.kind(), ErrorKind::Unavailable);
     }
@@ -899,6 +910,7 @@ mod test {
         let Error::FetchJwksError { source, .. } = &err else {
             panic!("expected a fetch error, got {err:?}");
         };
+        let source = source.downcast_ref::<reqwest::Error>().unwrap();
         assert!(source.is_timeout(), "{source:?}");
         assert_eq!(err.kind(), ErrorKind::Unavailable);
     }

@@ -3,8 +3,8 @@
 use std::{collections::HashMap, sync::Arc};
 
 use jsonwebtoken::{
-    Algorithm, DecodingKey,
-    jwk::{AlgorithmParameters, Jwk, KeyOperations, PublicKeyUse},
+    Algorithm, AlgorithmFamily, DecodingKey,
+    jwk::{AlgorithmParameters, EllipticCurve, Jwk, KeyOperations, PublicKeyUse},
 };
 
 /// A key of the JWKS, ready to verify signatures.
@@ -95,28 +95,43 @@ pub(super) fn prepare_key(value: serde_json::Value) -> Option<(String, Verificat
         );
         return None;
     };
-    let decoding_key = match DecodingKey::from_jwk(&jwk) {
-        Ok(decoding_key) => decoding_key,
-        Err(e) => {
-            tracing::debug!(kid, "Skipping a JWKS key that cannot be used: {e}");
-            return None;
-        }
-    };
-    if algorithm.is_some_and(|algorithm| algorithm.family() != decoding_key.family()) {
+    if algorithm.is_some_and(|algorithm| !fits(algorithm, &jwk.algorithm)) {
         tracing::debug!(
             kid,
             ?algorithm,
-            "Skipping a JWKS key whose algorithm does not fit its key type."
+            "Skipping a JWKS key whose algorithm does not fit its key type or curve."
         );
         return None;
     }
-    Some((
-        kid,
-        VerificationKey {
-            decoding_key,
-            algorithm,
-        },
-    ))
+    match DecodingKey::from_jwk(&jwk) {
+        Ok(decoding_key) => Some((
+            kid,
+            VerificationKey {
+                decoding_key,
+                algorithm,
+            },
+        )),
+        Err(e) => {
+            tracing::debug!(kid, "Skipping a JWKS key that cannot be used: {e}");
+            None
+        }
+    }
+}
+
+/// Whether `algorithm` verifies signatures with a key of these parameters. Each ECDSA
+/// algorithm takes keys of one curve (RFC 7518, section 3.4).
+fn fits(algorithm: Algorithm, parameters: &AlgorithmParameters) -> bool {
+    match parameters {
+        AlgorithmParameters::RSA(_) => algorithm.family() == AlgorithmFamily::Rsa,
+        AlgorithmParameters::EllipticCurve(key) => matches!(
+            (algorithm, &key.curve),
+            (Algorithm::ES256, EllipticCurve::P256) | (Algorithm::ES384, EllipticCurve::P384)
+        ),
+        AlgorithmParameters::OctetKeyPair(key) => {
+            algorithm == Algorithm::EdDSA && key.curve == EllipticCurve::Ed25519
+        }
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -137,6 +152,26 @@ mod test {
 
     fn ed25519_jwk(kid: &str) -> serde_json::Value {
         ed25519_pair(kid).1
+    }
+
+    /// The JWK of a new ECDSA key on `crv`, `P-256` or `P-384`.
+    fn ec_jwk(kid: &str, crv: &str, alg: &str) -> serde_json::Value {
+        use aws_lc_rs::signature::{
+            ECDSA_P256_SHA256_FIXED_SIGNING, ECDSA_P384_SHA384_FIXED_SIGNING, EcdsaKeyPair,
+            KeyPair as _,
+        };
+        use base64::Engine as _;
+        let curve = match crv {
+            "P-256" => &ECDSA_P256_SHA256_FIXED_SIGNING,
+            "P-384" => &ECDSA_P384_SHA384_FIXED_SIGNING,
+            _ => panic!("unsupported curve {crv}"),
+        };
+        let key_pair = EcdsaKeyPair::generate(curve).unwrap();
+        // An uncompressed point: 0x04, then x and y of equal length.
+        let point = &key_pair.public_key().as_ref()[1..];
+        let (x, y) = point.split_at(point.len() / 2);
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        serde_json::json!({ "kty": "EC", "crv": crv, "alg": alg, "kid": kid, "x": encode(x), "y": encode(y) })
     }
 
     fn kids(keys: &KeySet) -> Vec<&str> {
@@ -185,14 +220,21 @@ mod test {
                 unknown_algorithm,
                 broken,
                 other_family,
+                ec_jwk("es256", "P-256", "ES256"),
+                ec_jwk("es384", "P-384", "ES384"),
+                ec_jwk("other-curve", "P-384", "ES256"),
                 serde_json::json!({ "kty": "oct", "kid": "symmetric", "alg": "HS256", "k": "c2VjcmV0" }),
+                serde_json::json!({ "kty": "RSA", "kid": "rs256", "alg": "RS256", "n": "AQAB", "e": "AQAB" }),
                 serde_json::json!({ "kty": "RSA", "kid": "oaep", "alg": "RSA-OAEP", "n": "AQAB", "e": "AQAB" }),
                 serde_json::json!({ "kty": "unknown", "kid": "unknown-type" }),
                 serde_json::json!("not an object"),
             ],
         };
         let keys = KeySet::parse(jwks);
-        assert_eq!(kids(&keys), ["k1", "verify-operation"]);
+        assert_eq!(
+            kids(&keys),
+            ["es256", "es384", "k1", "rs256", "verify-operation"]
+        );
     }
 
     #[test]

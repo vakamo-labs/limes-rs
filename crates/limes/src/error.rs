@@ -87,12 +87,15 @@ pub enum Error {
         #[source]
         source: reqwest::Error,
     },
+    /// No keys have loaded yet, and the latest fetch of the JWKS failed. The source is a
+    /// [`reqwest::Error`], or an [`std::io::Error`] of kind `TimedOut` if the fetch did not
+    /// finish in time.
     #[cfg(feature = "jwks")]
     #[error("Failed to fetch the JWKS from {url}: {source}")]
     FetchJwksError {
         url: String,
         #[source]
-        source: std::sync::Arc<reqwest::Error>,
+        source: std::sync::Arc<dyn std::error::Error + Send + Sync>,
     },
     #[cfg(feature = "jwks")]
     #[error("Failed to parse openid configuration. Expected fields: {expected_fields:?}")]
