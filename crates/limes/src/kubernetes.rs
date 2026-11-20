@@ -10,6 +10,10 @@ use k8s_openapi::api::authentication::v1::{
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::PostParams;
+use std::time::Duration;
+
+/// How long a `TokenReview` request may take.
+const TOKEN_REVIEW_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
 /// Authenticator for Kubernetes.
@@ -18,6 +22,10 @@ use kube::api::PostParams;
 /// Ensure that the service account running the authenticator has the necessary permissions.
 ///
 /// If no `client` is specified, the default client on the system will be used.
+///
+/// A `TokenReview` that does not finish within 10 seconds fails with
+/// [`Error::KubernetesTokenReviewError`] of kind [`Unavailable`](crate::error::ErrorKind::Unavailable),
+/// also if the client sets longer timeouts.
 ///
 /// If you don't want to validate the audience or the issuer, pass an empty slice.
 /// When using [`AuthenticatorChain`](`crate::AuthenticatorChain`), it is highly recommended to set
@@ -163,19 +171,30 @@ impl Authenticator for KubernetesAuthenticator {
         }
 
         let api = kube::api::Api::all(self.client.clone());
-        let review = api
-            .create(
-                &PostParams::default(),
-                &TokenReview {
-                    metadata: ObjectMeta::default(),
-                    spec: TokenReviewSpec {
-                        audiences: Some(self.audiences.clone()),
-                        token: Some(token.to_string()),
-                    },
-                    status: None,
-                },
-            )
+        let params = PostParams::default();
+        let request = TokenReview {
+            metadata: ObjectMeta::default(),
+            spec: TokenReviewSpec {
+                audiences: Some(self.audiences.clone()),
+                token: Some(token.to_string()),
+            },
+            status: None,
+        };
+        // kube's default client has no read timeout, so an API server that accepts the
+        // connection and never answers would hold the request forever.
+        let review = tokio::time::timeout(TOKEN_REVIEW_TIMEOUT, api.create(&params, &request))
             .await
+            .map_err(|_| {
+                Error::KubernetesTokenReviewError(kube::Error::Service(Box::new(
+                    std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!(
+                            "no answer within {} seconds",
+                            TOKEN_REVIEW_TIMEOUT.as_secs()
+                        ),
+                    ),
+                )))
+            })?
             .map_err(Error::KubernetesTokenReviewError)?;
 
         parse_review_status(
@@ -353,6 +372,39 @@ mod test {
             );
             assert_eq!(err.kind(), expected, "{status:?}");
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_token_review_without_answer_is_unavailable() {
+        let service = tower::service_fn(|_: http::Request<kube::client::Body>| {
+            std::future::pending::<
+                std::io::Result<http::Response<http_body_util::Full<bytes::Bytes>>>,
+            >()
+        });
+        let authenticator = KubernetesAuthenticator::new_with_client(
+            None,
+            vec![],
+            kube::client::Client::new(service, "default"),
+        )
+        .unwrap();
+
+        let started = tokio::time::Instant::now();
+        // Without a deadline in `authenticate`, the paused clock has no timer to advance to.
+        let err = tokio::time::timeout(
+            2 * TOKEN_REVIEW_TIMEOUT,
+            authenticator.authenticate("token", &IntrospectionResult::Unknown),
+        )
+        .await
+        .expect("authenticate has a deadline")
+        .unwrap_err();
+
+        assert_eq!(started.elapsed(), TOKEN_REVIEW_TIMEOUT);
+        assert!(matches!(err, Error::KubernetesTokenReviewError(_)), "{err}");
+        assert_eq!(err.kind(), ErrorKind::Unavailable);
+        assert_eq!(
+            err.to_string(),
+            "Failed to validate token using kubernetes TokenReview: ServiceError: no answer within 10 seconds"
+        );
     }
 
     #[tokio::test]
