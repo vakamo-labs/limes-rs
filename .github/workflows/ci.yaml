@@ -16,8 +16,8 @@ env:
   # Change to specific Rust release to pin
   rust_stable: stable
   rust_nightly: nightly-2025-12-30
-  rust_clippy: '1.90'
-  rust_min: '1.89'
+  rust_clippy: '1.95'
+  rust_min: '1.95'
 
 defaults:
   run:
@@ -86,7 +86,7 @@ jobs:
         env:
           # `cargo doc` does not build dev-dependencies, and the library no longer pins a
           # k8s-openapi version, so select one here for the docs build.
-          K8S_OPENAPI_ENABLED_VERSION: "1.32"
+          K8S_OPENAPI_ENABLED_VERSION: "1.33"
         # env:
         #   RUSTFLAGS: --cfg docsrs
         #   RUSTDOCFLAGS: --cfg docsrs -Dwarnings
