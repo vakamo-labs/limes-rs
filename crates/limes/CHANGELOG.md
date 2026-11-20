@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0](https://github.com/vakamo-labs/limes-rs/compare/v0.7.0...v0.8.0) - 2026-11-20
+
+### Added
+
+- *(kubernetes)* [**breaking**] update kube to 5 and k8s-openapi to 0.29 ([#96](https://github.com/vakamo-labs/limes-rs/pull/96))
+- [**breaking**] replace jwks_client_rs with an own JWKS key cache on jsonwebtoken 12 ([#93](https://github.com/vakamo-labs/limes-rs/pull/93))
+- [**breaking**] classify authentication errors with Error::kind ([#92](https://github.com/vakamo-labs/limes-rs/pull/92))
+- add a tower layer for axum and tonic ([#89](https://github.com/vakamo-labs/limes-rs/pull/89))
+
+### Fixed
+
+- [**breaking**] refuse a whitespace literal separator on none_of ([#94](https://github.com/vakamo-labs/limes-rs/pull/94))
+- time out a Kubernetes TokenReview after 10 seconds ([#95](https://github.com/vakamo-labs/limes-rs/pull/95))
+
 ## [0.7.0](https://github.com/vakamo-labs/limes-rs/compare/v0.6.0...v0.7.0) - 2026-11-07
 
 ### Added
