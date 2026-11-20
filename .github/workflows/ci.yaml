@@ -86,7 +86,7 @@ jobs:
         env:
           # `cargo doc` does not build dev-dependencies, and the library no longer pins a
           # k8s-openapi version, so select one here for the docs build.
-          K8S_OPENAPI_ENABLED_VERSION: "1.32"
+          K8S_OPENAPI_ENABLED_VERSION: "1.33"
         # env:
         #   RUSTFLAGS: --cfg docsrs
         #   RUSTDOCFLAGS: --cfg docsrs -Dwarnings
