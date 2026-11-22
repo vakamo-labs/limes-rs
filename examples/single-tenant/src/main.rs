@@ -1,15 +1,10 @@
 use axum::{Extension, response::IntoResponse, routing::get};
-use limes::{
-    Authentication, format_subject, jwks::JWKSWebAuthenticator, tower::AuthenticationLayer,
-};
-
-// Use none for single tenant setups
-const IDP_SEPARATOR: Option<char> = None;
+use limes::{Authentication, jwks::JWKSWebAuthenticator, tower::AuthenticationLayer};
 
 #[tokio::main]
 async fn main() {
     let authenticator = JWKSWebAuthenticator::new(
-        "https://accounts.google.com", // Must provide ./well-known/openid-configuration
+        "https://accounts.google.com", // Must provide /.well-known/openid-configuration
         Some(std::time::Duration::from_secs(10 * 60)), // Refresh JWKS keys every 10 minutes
     )
     .await
@@ -28,5 +23,5 @@ async fn main() {
 }
 
 async fn whoami(Extension(auth): Extension<Authentication>) -> impl IntoResponse {
-    format!("Hello, {}!", format_subject(auth.subject(), IDP_SEPARATOR))
+    format!("Hello, {}!", auth.subject().subject_in_idp())
 }

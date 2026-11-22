@@ -287,8 +287,9 @@ impl ClaimRule {
     ///
     /// The claim is chosen by [`resolve`]: the first path that is *populated*, falling back
     /// to the first path that is present and not `null`; if there is none it is *missing*.
-    /// Preferring a populated path keeps an empty one — an `IdP` that emits `"scope": ""` —
-    /// from hiding a fallback that carries values, which would void a deny written over both.
+    /// Preferring a populated path keeps an empty one — an identity provider that emits
+    /// `"scope": ""` — from hiding a fallback that carries values, which would void a deny
+    /// written over both.
     ///
     /// A present claim is a set of values: a scalar is its canonical string, an array of
     /// scalars is its elements, and a grant splits strings by the separator. Objects and
@@ -345,12 +346,12 @@ impl ClaimRule {
 /// The claim a set of paths reads: the first *populated* path, falling back to the first
 /// path that is present and not `null`.
 ///
-/// Every reader of a claim — a rule, the scope requirement, [`Authentication::scopes`] — must
+/// Every reader of a claim — a rule, the scope requirement, [`VerifiedClaims::scopes`] — must
 /// resolve through here. A reader that resolves independently can end up guarding one claim
 /// while another is evaluated. Selection deliberately ignores the separator, so which claim
 /// is read is a property of the token rather than of how a rule happens to be formatted.
 ///
-/// [`Authentication::scopes`]: crate::Authentication::scopes
+/// [`VerifiedClaims::scopes`]: crate::VerifiedClaims::scopes
 pub(crate) fn resolve<'a, 'p, I>(
     claims: &'a serde_json::Value,
     paths: I,
@@ -364,10 +365,10 @@ where
             .filter_map(|path| navigate(claims, path))
             .filter(|v| !v.is_null())
     };
-    // A present but empty path must not hide a later one that carries values, or an `IdP`
-    // that emits `"scope": ""` would void every deny written over a fallback. When no path is
-    // populated the first present one still decides, so `exists: false` keeps meaning absent
-    // or `null`.
+    // A present but empty path must not hide a later one that carries values, or an identity
+    // provider that emits `"scope": ""` would void every deny written over a fallback. When no
+    // path is populated the first present one still decides, so `exists: false` keeps meaning
+    // absent or `null`.
     present(paths.clone())
         .find(|v| is_populated(v))
         .or_else(|| present(paths).next())

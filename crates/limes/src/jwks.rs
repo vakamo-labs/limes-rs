@@ -1,9 +1,9 @@
 //! Validate JWT tokens locally using JWKS keys fetched from a remote server.
 
-use crate::authenticator::{SCOPE_CLAIM, SCP_CLAIM};
+use crate::identity::{ISSUER_CLAIM, SCOPE_CLAIM, SCP_CLAIM};
 use crate::introspect::IntrospectionResult;
 use crate::{
-    Authentication, Authenticator, PrincipalType, Subject,
+    Authentication, Authenticator, Subject, VerifiedClaims,
     claims::{ClaimOperator, ClaimRule, Separator, navigate},
     error::RejectionReason,
     error::{Error, Result},
@@ -22,25 +22,18 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 const SUBJECT_CLAIM: &str = "sub";
-const IDTYP_CLAIM: &str = "idtyp";
-const APP_DISPLAYNAME_CLAIM: &str = "app_displayname";
-const NAME_CLAIM: &str = "name";
-const AUD_CLAIM: &str = "aud";
+const AUDIENCE_CLAIM: &str = "aud";
 
-#[derive(Clone)]
 /// Validate JWT tokens using JWKS keys fetched from a remote server.
 ///
-/// If you don't want to validate the audience, pass an empty slice for `audiences`.
-/// Audience check passes if the token audience is among the provided audiences.
+/// The `issuer_url` must serve `/.well-known/openid-configuration`. A token's issuer must be
+/// the `issuer` of that configuration or one added with
+/// [`add_additional_issuers`](Self::add_additional_issuers), for an identity provider that
+/// is reachable under several URLs.
 ///
-/// The provided `issuer_url` must provide a `/.well-known/openid-configuration` endpoint.
-/// Provided tokens must have their issuer set to the `issuer` field of the fetched configuration
-/// or to one of the `additional_issuers`.
-///
-/// `additional_issuers` can be used to add additional issuers to the list of issuers that are
-/// accepted. This is useful if the `IdP` is reachable under multiple URLs.
-///
-/// If `scope` is provided, the token must contain the provided scope.
+/// The audience is checked only if [`set_accepted_audiences`](Self::set_accepted_audiences)
+/// names some; then the token must carry one of them. [`set_scope`](Self::set_scope) requires
+/// a scope.
 ///
 /// The JWKS is fetched when the authenticator is created, in the background once the keys
 /// are older than `ttl` (one hour if `ttl` is `None`), and when a token names a key id that
@@ -53,20 +46,11 @@ const AUD_CLAIM: &str = "aud";
 /// the next fetch has run. Keys that cannot verify signatures, such as encryption keys and
 /// symmetric keys, are not used.
 ///
-/// Some `IdPs`, like Azure, use the `oid` field to identify users across applications.
-/// Set `subject_claim` to `oid` if you want to use this field as the subject.
-/// If `subject_claim` is not set, the `sub` field will be used as the subject. (Default)
+/// The subject is the `sub` claim. Some identity providers, like Entra ID, identify users
+/// across applications with `oid`; read it with [`with_subject_claim`](Self::with_subject_claim).
 ///
-///
-/// **Payload Field Mappings**:
-/// - `name`: `name` or `given_name`/ `first_name` and `family_name`/ `last_name` or `app_displayname` or `preferred_username`;
-///   if none are present and a display-name template is configured, it is rendered from the claims (see [`JWKSWebAuthenticator::with_display_name_template`])
-/// - `subject`: `sub` unless `subject_claim` is set, then it will be the value of the claim.
-/// - `claims`: all claims
-/// - `email`: `email` or `upn` if it contains an `@` or `preferred_username` if it contains an `@`
-/// - `principal_type`: inferred from the claims - `idtyp`, then the presence of a human-name
-///   claim (`Human`), an `app_displayname`/`client_id` claim (`Application`); `None` if undetermined.
-///
+/// The [`Authentication`] carries the token's claims as [`Identity::Claims`](crate::Identity::Claims).
+#[derive(Clone)]
 pub struct JWKSWebAuthenticator {
     // Shared so that cloning the authenticator per request is a refcount bump.
     inner: std::sync::Arc<Inner>,
@@ -82,8 +66,6 @@ struct Inner {
     required_claims: Vec<(String, ClaimRule)>,
     config_url: url::Url,
     subject_claim: Vec<String>,
-    role_claims: Option<Vec<String>>,
-    display_name_template: Option<DisplayNameTemplate>,
 }
 
 impl JWKSWebAuthenticator {
@@ -92,9 +74,11 @@ impl JWKSWebAuthenticator {
     /// Create a new [`JWKSWebAuthenticator`].
     ///
     /// # Arguments
-    /// - `idp_id`: The unique identifier of the IdP this authenticator is for. Use `None` for single tenant applications.
-    /// - `issuer_url`: The URL of the `IdP` to fetch the JWKS keys from. Must provide a `/.well-known/openid-configuration` endpoint.
+    /// - `issuer_url`: The URL of the identity provider to fetch the JWKS keys from. Must provide a `/.well-known/openid-configuration` endpoint.
     /// - `ttl`: After this time, the JWKS is fetched again in the background. If `None`, one hour. Below 30 seconds, it acts as 30 seconds.
+    ///
+    /// Name the identity provider with [`set_idp_id`](Self::set_idp_id) when you configure
+    /// several.
     ///
     /// Also fetches the JWKS, which takes up to 10 seconds if the identity provider does not
     /// answer. If that fetch fails, the authenticator starts without keys and fetches them
@@ -116,14 +100,12 @@ impl JWKSWebAuthenticator {
                 required_claims: Vec::new(),
                 config_url,
                 subject_claim: vec![SUBJECT_CLAIM.to_string()],
-                role_claims: None,
-                display_name_template: None,
             }),
         })
     }
 
-    /// Set the IdP id for the authenticator.
-    /// Setting the id is required for multi-tenant applications.
+    /// Set the IdP id for the authenticator. Required when you configure several identity
+    /// providers. An empty id leaves it unset.
     #[must_use]
     pub fn set_idp_id(mut self, idp_id: &str) -> Self {
         if !idp_id.is_empty() {
@@ -175,8 +157,9 @@ impl JWKSWebAuthenticator {
 
     /// Require a scope. Calling again replaces the previously required scope.
     ///
-    /// Read from the `scope` claim, or `scp` if `scope` is absent; a whitespace-delimited
-    /// string or an array of strings, whose values must be strings. Evaluated before
+    /// Read from the `scope` claim, or `scp` if `scope` is absent or carries no scopes; a
+    /// whitespace-delimited string or an array of strings, whose values must be strings.
+    /// Evaluated before
     /// [`with_required_claims`](Self::with_required_claims); a failure is reported as
     /// [`RejectionReason::ScopeMissing`].
     ///
@@ -234,58 +217,6 @@ impl JWKSWebAuthenticator {
         if !subject_claims.is_empty() {
             std::sync::Arc::make_mut(&mut self.inner).subject_claim = subject_claims;
         }
-        self
-    }
-
-    /// Set the field in the claims to extract roles from.
-    /// If not called, no roles will be extracted.
-    ///
-    /// The field should contain an array of strings or a single string.
-    /// Supports nested claims using dot notation, e.g., "resource_access.account.roles"
-    ///
-    /// Empty strings are ignored. If an empty string is provided, role claims will not be set.
-    #[must_use]
-    pub fn with_role_claim(self, role_claim: String) -> Self {
-        self.with_role_claims(vec![role_claim])
-    }
-
-    /// Set multiple claims in the token to extract roles from.
-    /// Overrides any previously set role claims.
-    /// If multiple claims are set, the first one that is found in the token will be used.
-    ///
-    /// Supports nested claims using dot notation, e.g., "resource_access.account.roles"
-    ///
-    /// Empty strings are filtered out. If only empty strings are provided, role claims will not be set.
-    #[must_use]
-    pub fn with_role_claims(mut self, role_claims: Vec<String>) -> Self {
-        let filtered: Vec<String> = role_claims.into_iter().filter(|s| !s.is_empty()).collect();
-        if filtered.is_empty() {
-            std::sync::Arc::make_mut(&mut self.inner).role_claims = None;
-        } else {
-            std::sync::Arc::make_mut(&mut self.inner).role_claims = Some(filtered);
-        }
-        self
-    }
-
-    /// Set a template used to derive the display name when a token carries no
-    /// name claim (none of `name` / `given_name`+`family_name` / `app_displayname` /
-    /// `preferred_username`). Placeholders of the form `{claim.path}` are
-    /// substituted with the string value at that (dot-notation) claim path;
-    /// `{email}` and `{sub}` are the common cases. Write a literal brace by
-    /// doubling it (`{{`/`}}`), as in [`std::fmt`]. If any referenced claim is
-    /// absent or not a string the template does not apply and the name is left
-    /// unset (so the caller keeps its own fallback).
-    ///
-    /// Takes an already-parsed [`DisplayNameTemplate`] (build one with
-    /// [`DisplayNameTemplate::parse`] or `str::parse`), so this setter is
-    /// infallible: the template is valid by construction, and a malformed one is
-    /// rejected at parse time rather than silently never rendering.
-    ///
-    /// Typical use is a machine / service-account issuer, e.g.
-    /// `DisplayNameTemplate::parse("Service Account {email}")`.
-    #[must_use]
-    pub fn with_display_name_template(mut self, template: DisplayNameTemplate) -> Self {
-        std::sync::Arc::make_mut(&mut self.inner).display_name_template = Some(template);
         self
     }
 
@@ -367,17 +298,11 @@ impl Authenticator for JWKSWebAuthenticator {
             &self.inner.required_claims,
         )?;
 
-        extract_authentication(
-            self.idp_id().map(String::as_str),
-            token_data,
-            &self.inner.subject_claim,
-            self.inner.role_claims.as_deref(),
-            self.inner.display_name_template.as_ref(),
-        )
+        extract_authentication(self.idp_id(), token_data, &self.inner.subject_claim)
     }
 
-    fn idp_id(&self) -> Option<&String> {
-        self.inner.idp_id.as_ref()
+    fn idp_id(&self) -> Option<&str> {
+        self.inner.idp_id.as_deref()
     }
 
     fn can_handle_token(&self, token: &str, introspection_result: &IntrospectionResult) -> bool {
@@ -410,7 +335,7 @@ fn authenticate_jwt(
     scope: Option<&ScopeRule>,
     required_claims: &[(String, ClaimRule)],
 ) -> Result<jsonwebtoken::TokenData<serde_json::Value>> {
-    // Some IdPs, like Azure, don't include the alg field in the jwks endpoint.
+    // Some identity providers, like Entra ID, don't include the alg field in the jwks endpoint.
     // In this case we trust the provided algorithm in the clients token.
     let mut validation = Validation::new(key.algorithm.unwrap_or(header.alg));
 
@@ -421,10 +346,14 @@ fn authenticate_jwt(
     } else {
         validation.set_audience(audiences);
         validation.validate_aud = true;
-        validation.required_spec_claims.insert("aud".to_string());
+        validation
+            .required_spec_claims
+            .insert(AUDIENCE_CLAIM.to_string());
     }
     validation.set_issuer(issuers);
-    validation.required_spec_claims.insert("iss".to_string());
+    validation
+        .required_spec_claims
+        .insert(ISSUER_CLAIM.to_string());
     // `exp` is validated by default; `nbf` (RFC 7519 §4.1.5) is opt-in. A token before its
     // `nbf` is not yet valid. An absent `nbf` stays acceptable.
     validation.validate_nbf = true;
@@ -486,126 +415,19 @@ fn extract_authentication(
     idp_id: Option<&str>,
     token_data: jsonwebtoken::TokenData<serde_json::Value>,
     subject_claim: &[String],
-    role_claims: Option<&[String]>,
-    display_name_template: Option<&DisplayNameTemplate>,
 ) -> Result<Authentication> {
     let subject_in_idp = get_subject(&token_data, subject_claim)?;
-    let header = token_data.header;
-    let claims = token_data.claims;
-
+    let audiences = crate::introspect::parse_aud(token_data.claims.get(AUDIENCE_CLAIM));
+    // A payload with a subject claim is a JSON object.
+    let claims = VerifiedClaims::try_from(token_data.claims)
+        .map_err(|_| Error::rejected(RejectionReason::SubjectClaimMissing))?;
     let subject = Subject::new(idp_id.map(ToString::to_string), subject_in_idp);
 
-    // `parse_human_name` already returns the `name` claim when present, so a separate
-    // `name` lookup would be redundant.
-    let human_name = parse_human_name(&claims);
-    let app_name = claims.get(APP_DISPLAYNAME_CLAIM).and_then(value_as_string);
-
-    let principal_type = get_idp_type(&claims)
-        // If idp type is not set, try to infer it from the claims
-        .or(human_name.as_ref().map(|_t| PrincipalType::Human))
-        .or(app_name.as_ref().map(|_t| PrincipalType::Application))
-        // In Keycloak the client_id is the requesting application
-        .or(claims.get("client_id").map(|_t| PrincipalType::Application));
-
-    // Fall back lazily so we only allocate the username string when nothing better matched.
-    let name = human_name
-        .or(app_name)
-        .or_else(|| claims.get("preferred_username").and_then(value_as_string))
-        // Last resort for tokens that carry no name claim at all (e.g. machine /
-        // service-account tokens): render the configured display-name template.
-        .or_else(|| display_name_template.and_then(|t| t.render(&claims)));
-
-    let roles = get_roles(&claims, role_claims);
-    let audiences = crate::introspect::parse_aud(claims.get(AUD_CLAIM));
-    let email = get_email(&claims);
-
     Ok(Authentication::builder()
-        .token_header(Some(header))
-        .name(name)
-        .email(email)
         .subject(subject)
-        .principal_type(principal_type)
-        .roles(roles)
         .audiences(audiences)
-        // Move the claims in last; everything above only borrows them, so no clone is needed.
-        .claims(claims)
+        .identity(claims)
         .build())
-}
-
-fn get_idp_type(claims: &serde_json::Value) -> Option<PrincipalType> {
-    match claims.get(IDTYP_CLAIM).and_then(|v| v.as_str()) {
-        Some("user") => Some(PrincipalType::Human),
-        Some("app" | "device") => Some(PrincipalType::Application),
-        _ => None,
-    }
-}
-
-fn get_email(claims: &serde_json::Value) -> Option<String> {
-    claims
-        .get("email")
-        .and_then(value_as_string)
-        .or(claims
-            .get("upn")
-            .and_then(value_as_string)
-            .filter(|s| s.contains('@')))
-        .or(claims
-            .get("preferred_username")
-            .and_then(value_as_string)
-            .filter(|s| s.contains('@')))
-}
-
-/// Extracts roles from JWT claims by checking configured claim paths.
-///
-/// # Behavior
-/// - Iterates through provided claim paths in order, returning the first non-empty match
-/// - For array values: filters out non-string elements (numbers, objects, nulls, etc.)
-/// - If an array exists but contains only non-strings, continues to the next path
-/// - If an explicitly empty array is found, continues to the next path
-/// - For single values: returns if the value is a string, otherwise continues
-/// - Returns `None` if no claim paths contain valid string roles
-/// - Logs a debug message if role claims were configured but none were found in the token
-///
-/// This ensures that malformed or empty role claims don't prevent fallback to alternate
-/// claim paths, while still extracting valid string roles when they exist.
-fn get_roles(claims: &serde_json::Value, role_claims: Option<&[String]>) -> Option<Vec<String>> {
-    let role_claim_paths = role_claims?;
-
-    if role_claim_paths.is_empty() {
-        return None;
-    }
-
-    for claim_path in role_claim_paths {
-        // Navigate nested claims (dot-notation, e.g. "resource_access.account.roles").
-        let Some(current) = navigate(claims, claim_path) else {
-            continue;
-        };
-
-        // Handle array of strings
-        if let Some(roles_array) = current.as_array() {
-            // Filter to only string values, ignoring numbers, objects, nulls, etc.
-            let roles: Vec<String> = roles_array.iter().filter_map(value_as_string).collect();
-            if !roles.is_empty() {
-                return Some(roles);
-            }
-            // If array exists but contains no valid strings (or is empty),
-            // continue to next claim path rather than returning None immediately.
-            // This allows fallback to alternate claim paths.
-        }
-        // Handle single string (less common but possible)
-        else if let Some(role) = value_as_string(current) {
-            return Some(vec![role]);
-        }
-        // If the value is neither an array nor a string (e.g., object, number),
-        // continue to the next claim path.
-    }
-
-    // If we configured role claims but found none, issue a warning
-    tracing::debug!(
-        "Role claims `{role_claim_paths:?}` were configured but no valid roles were found in the token. \
-         Configured paths may be missing or contain non-string values."
-    );
-
-    None
 }
 
 fn get_subject(
@@ -614,7 +436,7 @@ fn get_subject(
 ) -> Result<String> {
     for claim in subject_claim {
         // The same path grammar every claim path uses, so one configured string means one
-        // thing across the subject, the roles and the rules.
+        // thing for the subject, the rules and `VerifiedClaims::claim`.
         let subject = navigate(&token_data.claims, claim)
             .and_then(value_as_string)
             // A blank subject is not an identity: it would collapse every token carrying one
@@ -625,27 +447,6 @@ fn get_subject(
         }
     }
     Err(Error::rejected(RejectionReason::SubjectClaimMissing))
-}
-
-fn parse_human_name(claims: &serde_json::Value) -> Option<String> {
-    let first_name = claims
-        .get("given_name")
-        .or(claims.get("first_name"))
-        .and_then(value_as_string);
-    let last_name = claims
-        .get("family_name")
-        .or(claims.get("last_name"))
-        .and_then(value_as_string);
-
-    claims
-        .get(NAME_CLAIM)
-        .and_then(value_as_string)
-        .or_else(|| match (first_name, last_name) {
-            (Some(first), Some(last)) => Some(format!("{first} {last}")),
-            (Some(first), None) => Some(first),
-            (None, Some(last)) => Some(last),
-            (None, None) => None,
-        })
 }
 
 #[derive(serde::Deserialize, Clone, Debug)]
@@ -675,181 +476,12 @@ impl std::fmt::Debug for JWKSWebAuthenticator {
             .field("config_url", &self.inner.config_url)
             .field("subject_claim", &self.inner.subject_claim)
             .field("keys", &self.inner.keys)
-            .field("role_claims", &self.inner.role_claims)
-            .field("display_name_template", &self.inner.display_name_template)
             .finish()
     }
 }
 
 fn value_as_string(value: &serde_json::Value) -> Option<String> {
     value.as_str().map(std::string::ToString::to_string)
-}
-
-/// A structurally invalid display-name template — one that can never render for
-/// any token, independent of its claims. (A well-formed template whose claim is
-/// merely absent from a given token is *not* an error; it simply doesn't apply
-/// to that token.) Returned by [`DisplayNameTemplate::parse`].
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum DisplayNameTemplateError {
-    /// A `{` with no matching `}` (write a literal brace as `{{`).
-    #[error("unmatched `{{` in display-name template (write a literal brace as `{{{{`)")]
-    UnmatchedOpenBrace,
-    /// A `}` with no matching `{` (write a literal brace as `}}`).
-    #[error("unmatched `}}` in display-name template (write a literal brace as `}}}}`)")]
-    UnmatchedCloseBrace,
-    /// An empty `{}` placeholder — a placeholder must name a claim.
-    #[error("empty `{{}}` placeholder in display-name template (name a claim, e.g. `{{email}}`)")]
-    EmptyPlaceholder,
-}
-
-/// One piece of a parsed display-name template.
-enum TemplateEvent<'a> {
-    /// Verbatim text, with any `{{`/`}}` already unescaped to a single brace.
-    Literal(&'a str),
-    /// A `{claim.path}` placeholder — the dot-notation path, without braces.
-    Claim(&'a str),
-}
-
-/// Walk `template`, invoking `sink` for each literal chunk and placeholder in
-/// order (`{{`/`}}` are emitted as single-brace literals). This is the single
-/// source of the template grammar; [`DisplayNameTemplate::parse`] drives it to
-/// build the validated segment list.
-fn parse_display_name_template(
-    template: &str,
-    mut sink: impl FnMut(TemplateEvent<'_>),
-) -> std::result::Result<(), DisplayNameTemplateError> {
-    let mut rest = template;
-    loop {
-        let Some(idx) = rest.find(['{', '}']) else {
-            sink(TemplateEvent::Literal(rest));
-            return Ok(());
-        };
-        sink(TemplateEvent::Literal(&rest[..idx]));
-        let brace = rest.as_bytes()[idx];
-        rest = &rest[idx + 1..];
-
-        if brace == b'}' {
-            // A `}` is only valid as the escape `}}`; a lone `}` is malformed.
-            let Some(stripped) = rest.strip_prefix('}') else {
-                return Err(DisplayNameTemplateError::UnmatchedCloseBrace);
-            };
-            sink(TemplateEvent::Literal("}"));
-            rest = stripped;
-            continue;
-        }
-
-        // `brace == b'{'`: either the escape `{{` or the start of a placeholder.
-        if let Some(stripped) = rest.strip_prefix('{') {
-            sink(TemplateEvent::Literal("{"));
-            rest = stripped;
-            continue;
-        }
-        let Some(close) = rest.find('}') else {
-            return Err(DisplayNameTemplateError::UnmatchedOpenBrace);
-        };
-        let path = &rest[..close];
-        // A `{` before the closing `}` means an earlier `{` was never closed.
-        if path.contains('{') {
-            return Err(DisplayNameTemplateError::UnmatchedOpenBrace);
-        }
-        // Empty or whitespace-only placeholders name no claim.
-        if path.trim().is_empty() {
-            return Err(DisplayNameTemplateError::EmptyPlaceholder);
-        }
-        sink(TemplateEvent::Claim(path));
-        rest = &rest[close + 1..];
-    }
-}
-
-/// A validated display-name template: a sequence of literal text and
-/// `{claim.path}` placeholders. Constructed via [`DisplayNameTemplate::parse`]
-/// (or [`str::parse`]), so holding one is proof its syntax is valid — which is
-/// why [`JWKSWebAuthenticator::with_display_name_template`] can accept it
-/// infallibly. Resolved against a token's claims during authentication.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DisplayNameTemplate {
-    source: String,
-    segments: Vec<Segment>,
-}
-
-/// One piece of a parsed [`DisplayNameTemplate`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Segment {
-    /// Verbatim text, with any `{{`/`}}` already unescaped to a single brace.
-    Literal(String),
-    /// A claim path (dot-notation) to resolve at render time.
-    Claim(String),
-}
-
-impl DisplayNameTemplate {
-    /// Parse and validate a display-name template.
-    ///
-    /// Placeholders are `{claim.path}` (dot-notation); write a literal brace by
-    /// doubling it (`{{`/`}}`), as in [`std::fmt`]. The *structure* is validated
-    /// here — braces must balance and every placeholder must name a claim — but
-    /// whether a referenced claim exists is token-dependent and is checked only at
-    /// render time.
-    ///
-    /// # Errors
-    /// Returns [`DisplayNameTemplateError`] for an unmatched `{`, a stray `}`, or
-    /// an empty `{}` placeholder.
-    pub fn parse(template: &str) -> std::result::Result<Self, DisplayNameTemplateError> {
-        let mut segments = Vec::new();
-        let mut literal = String::new();
-        parse_display_name_template(template, |event| match event {
-            TemplateEvent::Literal(text) => literal.push_str(text),
-            TemplateEvent::Claim(path) => {
-                if !literal.is_empty() {
-                    segments.push(Segment::Literal(std::mem::take(&mut literal)));
-                }
-                segments.push(Segment::Claim(path.to_string()));
-            }
-        })?;
-        if !literal.is_empty() {
-            segments.push(Segment::Literal(literal));
-        }
-        Ok(Self {
-            source: template.to_string(),
-            segments,
-        })
-    }
-
-    /// Render the template against `claims`. Returns `None` — so the caller keeps
-    /// its own default — when a referenced claim is missing or not a string
-    /// (logged at `debug`), or when the result is empty or all-whitespace.
-    /// Surrounding whitespace is trimmed.
-    fn render(&self, claims: &serde_json::Value) -> Option<String> {
-        let mut out = String::with_capacity(self.source.len());
-        for segment in &self.segments {
-            match segment {
-                Segment::Literal(text) => out.push_str(text),
-                Segment::Claim(path) => {
-                    let Some(value) = navigate(claims, path).and_then(value_as_string) else {
-                        tracing::debug!(
-                            "Display name template `{}` not applied: claim `{path}` is missing or not a string.",
-                            self.source
-                        );
-                        return None;
-                    };
-                    out.push_str(&value);
-                }
-            }
-        }
-        let trimmed = out.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string())
-        }
-    }
-}
-
-impl std::str::FromStr for DisplayNameTemplate {
-    type Err = DisplayNameTemplateError;
-
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        Self::parse(s)
-    }
 }
 
 /// The `set_scope` requirement: a whitespace-split `all_of` rule on `scope`/`scp`.
@@ -869,7 +501,7 @@ impl ScopeRule {
     }
 
     /// Scopes are strings: a claim holding numbers or booleans is malformed and never
-    /// satisfies the requirement, matching [`Authentication::scopes`].
+    /// satisfies the requirement, matching [`VerifiedClaims::scopes`].
     ///
     /// The guard reads the claim the rule itself resolved. Resolving it a second time would
     /// let the guard vet one claim while the rule evaluates another.
@@ -1346,11 +978,8 @@ mod test {
         assert!(!scope.matches(&serde_json::json!({ "scope": ["admin", true] })));
     }
 
-    /// The guard and the rule must read the same claim. When they resolve independently, a
-    /// `scope` that carries nothing sends the rule to `scp` while the guard still vets
-    /// `scope`, and a malformed `scp` passes unchecked.
-    /// The subject reads the same path grammar as the roles claim and every rule, so one
-    /// configured string means one thing across all three.
+    /// The subject reads the same path grammar as every rule and `VerifiedClaims::claim`, so
+    /// one configured string means one thing across all three.
     #[test]
     fn test_subject_claim_is_a_path() {
         let claims = serde_json::json!({
@@ -1412,6 +1041,9 @@ mod test {
         }
     }
 
+    /// The guard and the rule must read the same claim. When they resolve independently, a
+    /// `scope` that carries nothing sends the rule to `scp` while the guard still vets
+    /// `scope`, and a malformed `scp` passes unchecked.
     #[test]
     fn test_scope_rule_guards_the_claim_it_evaluates() {
         let scope = ScopeRule::new("admin".to_string()).unwrap();
@@ -1439,7 +1071,7 @@ mod test {
         }
     }
 
-    /// `Authentication::scopes` must report the scopes the requirement enforced against.
+    /// `VerifiedClaims::scopes` must report the scopes the requirement enforced against.
     #[test]
     fn test_reported_scopes_are_the_enforced_scopes() {
         let scope = ScopeRule::new("admin".to_string()).unwrap();
@@ -1449,16 +1081,9 @@ mod test {
             serde_json::json!({ "scope": [], "scp": ["admin"] }),
             serde_json::json!({ "scope": "admin", "scp": ["other"] }),
         ] {
-            let auth = Authentication::builder()
-                .token_header(None)
-                .claims(claims.clone())
-                .name(None)
-                .email(None)
-                .subject(crate::Subject::new(None, "sub".to_string()))
-                .principal_type(None)
-                .build();
+            let verified = VerifiedClaims::try_from(claims.clone()).unwrap();
             assert_eq!(
-                auth.scopes().any(|s| s == "admin"),
+                verified.scopes().any(|s| s == "admin"),
                 scope.matches(&claims),
                 "{claims}: reported scopes disagree with enforcement"
             );
@@ -1714,9 +1339,8 @@ mod test {
                     "xms_tdbr": "EU"
         });
 
-        let token_header = jsonwebtoken::Header::new(Algorithm::RS256);
         let token_data = jsonwebtoken::TokenData {
-            header: token_header.clone(),
+            header: Header::new(Algorithm::RS256),
             claims: claims.clone(),
         };
 
@@ -1724,8 +1348,6 @@ mod test {
             Some("idp"),
             token_data,
             &["oid".to_string(), "sub".to_string()],
-            None,
-            None,
         )
         .unwrap();
 
@@ -1734,12 +1356,8 @@ mod test {
             "f621fc83-4ec9-4bf8-bc8d-xxxxxxxxxxxx".to_string(),
         );
         let expected_payload = Authentication::builder()
-            .token_header(Some(token_header))
-            .claims(claims.clone())
-            .name(Some("ht-testing-lakekeeper-oauth".to_string()))
-            .email(None)
             .subject(subject)
-            .principal_type(Some(PrincipalType::Application))
+            .identity(VerifiedClaims::try_from(claims.clone()).unwrap())
             .audiences(HashSet::from([
                 "00000003-0000-0000-c000-000000000000".to_string()
             ]))
@@ -1780,25 +1398,19 @@ mod test {
           "ver": "1.0"
         });
 
-        let token_header = jsonwebtoken::Header::new(Algorithm::RS256);
         let token_data = jsonwebtoken::TokenData {
-            header: token_header.clone(),
+            header: Header::new(Algorithm::RS256),
             claims: claims.clone(),
         };
 
         let payload =
-            extract_authentication(Some("idp"), token_data, &["oid".to_string()], None, None)
-                .unwrap();
+            extract_authentication(Some("idp"), token_data, &["oid".to_string()]).unwrap();
 
         let subject = Subject::new(Some("idp".to_string()), "user-oid".to_string());
 
         let expected_payload = Authentication::builder()
-            .token_header(Some(token_header))
-            .claims(claims.clone())
-            .name(Some("Peter Cold".to_string()))
-            .email(Some("peter@example.com".to_string()))
             .subject(subject)
-            .principal_type(Some(PrincipalType::Human))
+            .identity(VerifiedClaims::try_from(claims.clone()).unwrap())
             .audiences(HashSet::from(["api://xyz".to_string()]))
             .build();
 
@@ -1846,15 +1458,13 @@ mod test {
             "xms_tdbr": "EU"
         });
 
-        let token_header = jsonwebtoken::Header::new(Algorithm::RS256);
         let token_data = jsonwebtoken::TokenData {
-            header: token_header.clone(),
+            header: Header::new(Algorithm::RS256),
             claims: claims.clone(),
         };
 
         let payload =
-            extract_authentication(Some("idp"), token_data, &["oid".to_string()], None, None)
-                .unwrap();
+            extract_authentication(Some("idp"), token_data, &["oid".to_string()]).unwrap();
 
         let subject = Subject::new(
             Some("idp".to_string()),
@@ -1862,182 +1472,14 @@ mod test {
         );
 
         let expected_payload = Authentication::builder()
-            .token_header(Some(token_header))
-            .claims(claims.clone())
-            .name(Some("Jack Frost".to_string()))
-            .email(Some("jack@example.com".to_string()))
             .subject(subject)
-            .principal_type(Some(PrincipalType::Human))
+            .identity(VerifiedClaims::try_from(claims.clone()).unwrap())
             .audiences(HashSet::from([
                 "00000003-0000-0000-c000-000000000000".to_string()
             ]))
             .build();
 
         assert_eq!(payload, expected_payload);
-    }
-
-    #[test]
-    fn test_get_roles_simple_claim() {
-        let claims = serde_json::json!({
-            "roles": ["admin", "user", "editor"]
-        });
-
-        let roles = get_roles(&claims, Some(&["roles".to_string()]));
-        assert_eq!(
-            roles,
-            Some(vec![
-                "admin".to_string(),
-                "user".to_string(),
-                "editor".to_string()
-            ])
-        );
-    }
-
-    #[test]
-    fn test_get_roles_nested_claim() {
-        let claims = serde_json::json!({
-            "resource_access": {
-                "account": {
-                    "roles": ["manage-account", "view-profile"]
-                }
-            }
-        });
-
-        let roles = get_roles(
-            &claims,
-            Some(&["resource_access.account.roles".to_string()]),
-        );
-        assert_eq!(
-            roles,
-            Some(vec![
-                "manage-account".to_string(),
-                "view-profile".to_string()
-            ])
-        );
-    }
-
-    #[test]
-    fn test_get_roles_multiple_paths_first_match() {
-        let claims = serde_json::json!({
-            "realm_access": {
-                "roles": ["realm-role"]
-            },
-            "resource_access": {
-                "account": {
-                    "roles": ["account-role"]
-                }
-            }
-        });
-
-        // Should return first match
-        let roles = get_roles(
-            &claims,
-            Some(&[
-                "realm_access.roles".to_string(),
-                "resource_access.account.roles".to_string(),
-            ]),
-        );
-        assert_eq!(roles, Some(vec!["realm-role".to_string()]));
-    }
-
-    #[test]
-    fn test_get_roles_fallback_to_second_path() {
-        let claims = serde_json::json!({
-            "resource_access": {
-                "account": {
-                    "roles": ["account-role"]
-                }
-            }
-        });
-
-        // First path doesn't exist, should fall back to second
-        let roles = get_roles(
-            &claims,
-            Some(&[
-                "realm_access.roles".to_string(),
-                "resource_access.account.roles".to_string(),
-            ]),
-        );
-        assert_eq!(roles, Some(vec!["account-role".to_string()]));
-    }
-
-    #[test]
-    fn test_get_roles_no_match() {
-        let claims = serde_json::json!({
-            "other_field": "value"
-        });
-
-        let roles = get_roles(&claims, Some(&["roles".to_string()]));
-        assert_eq!(roles, None);
-    }
-
-    #[test]
-    fn test_get_roles_single_string() {
-        let claims = serde_json::json!({
-            "role": "admin"
-        });
-
-        let roles = get_roles(&claims, Some(&["role".to_string()]));
-        assert_eq!(roles, Some(vec!["admin".to_string()]));
-    }
-
-    #[test]
-    fn test_get_roles_array_with_non_strings() {
-        // Array contains only non-string values (numbers, objects, nulls)
-        let claims = serde_json::json!({
-            "roles": [42, {"name": "admin"}, null, true]
-        });
-
-        // Should return None, not Some(vec![]), because no valid strings found
-        let roles = get_roles(&claims, Some(&["roles".to_string()]));
-        assert_eq!(roles, None);
-    }
-
-    #[test]
-    fn test_get_roles_empty_array() {
-        // Explicitly empty array
-        let claims = serde_json::json!({
-            "roles": []
-        });
-
-        // Should return None, not Some(vec![]), treating empty like non-existent
-        let roles = get_roles(&claims, Some(&["roles".to_string()]));
-        assert_eq!(roles, None);
-    }
-
-    #[test]
-    fn test_get_roles_mixed_array() {
-        // Array contains both strings and non-strings
-        let claims = serde_json::json!({
-            "roles": ["admin", 42, "user", null, "editor", {"name": "invalid"}]
-        });
-
-        // Should extract only the string values, filtering out non-strings
-        let roles = get_roles(&claims, Some(&["roles".to_string()]));
-        assert_eq!(
-            roles,
-            Some(vec![
-                "admin".to_string(),
-                "user".to_string(),
-                "editor".to_string()
-            ])
-        );
-    }
-
-    #[test]
-    fn test_get_roles_fallback_from_non_strings() {
-        // First path has only non-strings, second path has valid strings
-        let claims = serde_json::json!({
-            "invalid_roles": [42, null, {"role": "admin"}],
-            "valid_roles": ["user", "viewer"]
-        });
-
-        // Should skip first path (no valid strings) and use second path
-        let roles = get_roles(
-            &claims,
-            Some(&["invalid_roles".to_string(), "valid_roles".to_string()]),
-        );
-        assert_eq!(roles, Some(vec!["user".to_string(), "viewer".to_string()]));
     }
 
     #[test]
@@ -2081,20 +1523,13 @@ mod test {
           "email": "peter@example.com"
         });
 
-        let token_header = jsonwebtoken::Header::new(Algorithm::RS256);
         let token_data = jsonwebtoken::TokenData {
-            header: token_header.clone(),
+            header: Header::new(Algorithm::RS256),
             claims: claims.clone(),
         };
 
-        let payload = extract_authentication(
-            Some("idp"),
-            token_data.clone(),
-            &["sub".to_string()],
-            None,
-            None,
-        )
-        .unwrap();
+        let payload =
+            extract_authentication(Some("idp"), token_data.clone(), &["sub".to_string()]).unwrap();
 
         let subject = Subject::new(
             Some("idp".to_string()),
@@ -2102,43 +1537,12 @@ mod test {
         );
 
         let expected_payload = Authentication::builder()
-            .token_header(Some(token_header.clone()))
-            .claims(claims.clone())
-            .name(Some("Peter Cold".to_string()))
-            .email(Some("peter@example.com".to_string()))
             .subject(subject.clone())
-            .principal_type(Some(PrincipalType::Human))
+            .identity(VerifiedClaims::try_from(claims.clone()).unwrap())
             .audiences(HashSet::from(["account".to_string()]))
             .build();
 
         assert_eq!(payload, expected_payload);
-
-        // Test with realm_access.roles extraction
-        let payload_with_roles = extract_authentication(
-            Some("idp"),
-            token_data,
-            &["sub".to_string()],
-            Some(&["realm_access.roles".to_string()]),
-            None,
-        )
-        .unwrap();
-
-        let expected_with_roles = Authentication::builder()
-            .token_header(Some(token_header))
-            .claims(claims.clone())
-            .name(Some("Peter Cold".to_string()))
-            .email(Some("peter@example.com".to_string()))
-            .subject(subject)
-            .principal_type(Some(PrincipalType::Human))
-            .roles(Some(vec![
-                "offline_access".to_string(),
-                "uma_authorization".to_string(),
-                "default-roles-iceberg".to_string(),
-            ]))
-            .audiences(HashSet::from(["account".to_string()]))
-            .build();
-
-        assert_eq!(payload_with_roles, expected_with_roles);
     }
 
     #[test]
@@ -2188,20 +1592,13 @@ mod test {
           "client_id": "iceberg-machine-client"
         });
 
-        let token_header = jsonwebtoken::Header::new(Algorithm::RS256);
         let token_data = jsonwebtoken::TokenData {
-            header: token_header.clone(),
+            header: Header::new(Algorithm::RS256),
             claims: claims.clone(),
         };
 
-        let payload = extract_authentication(
-            Some("idp"),
-            token_data.clone(),
-            &["sub".to_string()],
-            None,
-            None,
-        )
-        .unwrap();
+        let payload =
+            extract_authentication(Some("idp"), token_data.clone(), &["sub".to_string()]).unwrap();
 
         let subject = Subject::new(
             Some("idp".to_string()),
@@ -2209,12 +1606,8 @@ mod test {
         );
 
         let expected_payload = Authentication::builder()
-            .token_header(Some(token_header.clone()))
-            .claims(claims.clone())
-            .name(Some("service-account-iceberg-machine-client".to_string()))
-            .email(None)
             .subject(subject.clone())
-            .principal_type(Some(PrincipalType::Application))
+            .identity(VerifiedClaims::try_from(claims.clone()).unwrap())
             .audiences(HashSet::from([
                 "iceberg-catalog".to_string(),
                 "account".to_string(),
@@ -2222,36 +1615,6 @@ mod test {
             .build();
 
         assert_eq!(payload, expected_payload);
-
-        // Test with resource_access.account.roles extraction
-        let payload_with_roles = extract_authentication(
-            Some("idp"),
-            token_data,
-            &["sub".to_string()],
-            Some(&["resource_access.account.roles".to_string()]),
-            None,
-        )
-        .unwrap();
-
-        let expected_with_roles = Authentication::builder()
-            .token_header(Some(token_header))
-            .claims(claims.clone())
-            .name(Some("service-account-iceberg-machine-client".to_string()))
-            .email(None)
-            .subject(subject)
-            .principal_type(Some(PrincipalType::Application))
-            .roles(Some(vec![
-                "manage-account".to_string(),
-                "manage-account-links".to_string(),
-                "view-profile".to_string(),
-            ]))
-            .audiences(HashSet::from([
-                "iceberg-catalog".to_string(),
-                "account".to_string(),
-            ]))
-            .build();
-
-        assert_eq!(payload_with_roles, expected_with_roles);
     }
 
     #[test]
@@ -2267,208 +1630,14 @@ mod test {
             "name": "Test User"
         });
 
-        let token_header = jsonwebtoken::Header::new(Algorithm::RS256);
         let token_data = jsonwebtoken::TokenData {
-            header: token_header.clone(),
+            header: Header::new(Algorithm::RS256),
             claims: claims.clone(),
         };
 
         let payload =
-            extract_authentication(Some("idp"), token_data, &["sub".to_string()], None, None)
-                .unwrap();
+            extract_authentication(Some("idp"), token_data, &["sub".to_string()]).unwrap();
 
         assert_eq!(payload.audiences(), &HashSet::new());
-    }
-
-    fn parse_ok(template: &str) -> DisplayNameTemplate {
-        DisplayNameTemplate::parse(template).expect("template should be valid")
-    }
-
-    #[test]
-    fn test_display_name_template_parse_accepts_well_formed() {
-        assert!(DisplayNameTemplate::parse("Service Account {email}").is_ok());
-        assert!(DisplayNameTemplate::parse("{sub}").is_ok());
-        assert!(DisplayNameTemplate::parse("literal, no placeholders").is_ok());
-        assert!(DisplayNameTemplate::parse("{{escaped}} {sub}").is_ok());
-        // Claim existence is token-dependent and deliberately NOT checked at parse.
-        assert!(DisplayNameTemplate::parse("{a.b.c}").is_ok());
-    }
-
-    #[test]
-    fn test_display_name_template_parse_rejects_structural_errors() {
-        assert_eq!(
-            DisplayNameTemplate::parse("Team {Alpha"),
-            Err(DisplayNameTemplateError::UnmatchedOpenBrace)
-        );
-        assert_eq!(
-            DisplayNameTemplate::parse("Team Alpha}"),
-            Err(DisplayNameTemplateError::UnmatchedCloseBrace)
-        );
-        assert_eq!(
-            DisplayNameTemplate::parse("{}"),
-            Err(DisplayNameTemplateError::EmptyPlaceholder)
-        );
-        // A `{` inside a placeholder means an earlier `{` was never closed.
-        assert_eq!(
-            DisplayNameTemplate::parse("{a{b}"),
-            Err(DisplayNameTemplateError::UnmatchedOpenBrace)
-        );
-        // A whitespace-only placeholder names no claim.
-        assert_eq!(
-            DisplayNameTemplate::parse("{ }"),
-            Err(DisplayNameTemplateError::EmptyPlaceholder)
-        );
-        assert_eq!(
-            DisplayNameTemplate::parse("{   }"),
-            Err(DisplayNameTemplateError::EmptyPlaceholder)
-        );
-    }
-
-    #[test]
-    fn test_display_name_template_from_str() {
-        let template: DisplayNameTemplate = "Service Account {email}".parse().unwrap();
-        let claims = serde_json::json!({ "email": "sa@example.com" });
-        assert_eq!(
-            template.render(&claims),
-            Some("Service Account sa@example.com".to_string())
-        );
-    }
-
-    #[test]
-    fn test_render_substitutes_email() {
-        let claims = serde_json::json!({ "email": "sa@example.com", "sub": "abc" });
-        assert_eq!(
-            parse_ok("Service Account {email}").render(&claims),
-            Some("Service Account sa@example.com".to_string())
-        );
-    }
-
-    #[test]
-    fn test_render_substitutes_sub() {
-        let claims = serde_json::json!({ "sub": "abc-123" });
-        assert_eq!(
-            parse_ok("{sub}").render(&claims),
-            Some("abc-123".to_string())
-        );
-    }
-
-    #[test]
-    fn test_render_navigates_nested_claim() {
-        let claims = serde_json::json!({ "a": { "b": { "c": "deep" } } });
-        assert_eq!(
-            parse_ok("name={a.b.c}").render(&claims),
-            Some("name=deep".to_string())
-        );
-    }
-
-    #[test]
-    fn test_render_escaped_braces() {
-        let claims = serde_json::json!({ "sub": "abc" });
-        // `{{`/`}}` are literal braces, matching `format!` semantics.
-        assert_eq!(parse_ok("{{}}").render(&claims), Some("{}".to_string()));
-        assert_eq!(
-            parse_ok("{{{sub}}}").render(&claims),
-            Some("{abc}".to_string())
-        );
-        assert_eq!(
-            parse_ok("Team {{Alpha}}").render(&claims),
-            Some("Team {Alpha}".to_string())
-        );
-    }
-
-    #[test]
-    fn test_render_literal_only() {
-        let claims = serde_json::json!({ "sub": "abc" });
-        assert_eq!(
-            parse_ok("Machine Account").render(&claims),
-            Some("Machine Account".to_string())
-        );
-    }
-
-    #[test]
-    fn test_render_missing_claim_yields_none() {
-        // `email` is absent, so the template does not apply and the caller falls
-        // back to its own default rather than rendering a half-filled string.
-        let claims = serde_json::json!({ "sub": "abc" });
-        assert_eq!(parse_ok("Service Account {email}").render(&claims), None);
-    }
-
-    #[test]
-    fn test_render_non_string_claim_yields_none() {
-        // A claim that exists but is not a string (e.g. an array) does not apply.
-        let claims = serde_json::json!({ "organizations": ["org-1"] });
-        assert_eq!(parse_ok("{organizations}").render(&claims), None);
-    }
-
-    #[test]
-    fn test_render_does_not_rescan_substituted_value() {
-        // A claim value that itself contains braces must never be re-interpreted
-        // as a placeholder — render walks pre-parsed segments, not the output.
-        let claims = serde_json::json!({ "org": "Team {X}" });
-        assert_eq!(
-            parse_ok("{org}").render(&claims),
-            Some("Team {X}".to_string())
-        );
-    }
-
-    #[test]
-    fn test_render_trims_surrounding_whitespace() {
-        let claims = serde_json::json!({ "sub": "abc" });
-        assert_eq!(
-            parse_ok("  {sub}  ").render(&claims),
-            Some("abc".to_string())
-        );
-    }
-
-    #[test]
-    fn test_display_name_template_applied_when_no_name_claim() {
-        // A bare machine token (no name/given_name/app_displayname/preferred_username)
-        // — as issued by e.g. service-account IdPs — falls back to the template.
-        let claims = serde_json::json!({
-            "sub": "00000000-0000-0000-0000-000000000000",
-            "email": "service-account@example.com",
-            "iss": "https://issuer.example.com",
-        });
-        let token_data = jsonwebtoken::TokenData {
-            header: jsonwebtoken::Header::new(Algorithm::RS256),
-            claims,
-        };
-        let template = parse_ok("Service Account {email}");
-        let payload = extract_authentication(
-            Some("oidc"),
-            token_data,
-            &["sub".to_string()],
-            None,
-            Some(&template),
-        )
-        .unwrap();
-        assert_eq!(
-            payload.full_name(),
-            Some("Service Account service-account@example.com")
-        );
-    }
-
-    #[test]
-    fn test_display_name_template_ignored_when_name_claim_present() {
-        // A real human-name claim always wins; the template is a fallback only.
-        let claims = serde_json::json!({
-            "sub": "x",
-            "name": "Jane Doe",
-            "email": "jane@example.com",
-        });
-        let token_data = jsonwebtoken::TokenData {
-            header: jsonwebtoken::Header::new(Algorithm::RS256),
-            claims,
-        };
-        let template = parse_ok("Service Account {email}");
-        let payload = extract_authentication(
-            Some("oidc"),
-            token_data,
-            &["sub".to_string()],
-            None,
-            Some(&template),
-        )
-        .unwrap();
-        assert_eq!(payload.full_name(), Some("Jane Doe"));
     }
 }

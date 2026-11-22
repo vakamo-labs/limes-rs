@@ -2,7 +2,7 @@
 
 use crate::introspect::IntrospectionResult;
 use crate::{
-    Authentication, Authenticator, Subject,
+    Authentication, Authenticator, KubernetesUser, Subject,
     error::{Error, Result},
 };
 use k8s_openapi::api::authentication::v1::{
@@ -38,15 +38,12 @@ const TOKEN_REVIEW_TIMEOUT: Duration = Duration::from_secs(10);
 /// We recommend using `audiences` instead of `issuers` for most Kubernetes setups.
 ///
 ///
-/// **Field Mappings**:
-/// - `name`: `user.username`
-/// - `email`: `user.extra.email`
-/// - `subject`: `user.uid` by default, or `user.username` when the subject
-///   source is set to [`KubernetesSubjectSource::Username`] via
-///   [`set_subject_source`](`KubernetesAuthenticator::set_subject_source`).
-/// - `claims`: `user.extra`
-/// - `principal_type`: Is always `Application` currently.
-///
+/// The [`Authentication`] carries the user of the `TokenReview` as
+/// [`Identity::Kubernetes`](crate::Identity::Kubernetes).
+/// Its subject is `user.uid` by default, or `user.username` when the subject source is set to
+/// [`KubernetesSubjectSource::Username`] via
+/// [`set_subject_source`](`KubernetesAuthenticator::set_subject_source`). Claim rules read
+/// `user.extra`.
 pub struct KubernetesAuthenticator {
     idp_id: Option<String>,
     client: kube::client::Client,
@@ -58,9 +55,9 @@ pub struct KubernetesAuthenticator {
 /// Which field of the Kubernetes `TokenReview` response is used as the
 /// authenticated user's subject (the provider-local part of the identity).
 ///
-/// The default is [`KubernetesSubjectSource::Uid`], which preserves historical
-/// behaviour.
+/// The default is [`KubernetesSubjectSource::Uid`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum KubernetesSubjectSource {
     /// Use `user.uid` — the service account's Kubernetes UID. Unique and
     /// immutable within a cluster, but assigned by Kubernetes, so the same
@@ -79,7 +76,7 @@ impl KubernetesAuthenticator {
     /// This will use the default Kubernetes client, inferred from the environment.
     ///
     /// # Arguments
-    /// - `idp_id`: The unique identifier of the IdP this authenticator is for.
+    /// - `idp_id`: The unique identifier of the identity provider this authenticator is for. An empty id is `None`.
     /// - `audiences`: The audiences to validate the token against. If empty, no audience validation is done.
     ///
     /// # Errors
@@ -89,7 +86,7 @@ impl KubernetesAuthenticator {
         audiences: Vec<String>,
     ) -> Result<Self> {
         Ok(Self {
-            idp_id: idp_id.map(ToString::to_string),
+            idp_id: idp_id.filter(|id| !id.is_empty()).map(ToString::to_string),
             client: Self::get_client().await?,
             audiences,
             issuers: vec![],
@@ -100,19 +97,20 @@ impl KubernetesAuthenticator {
     /// Create a new [`KubernetesAuthenticator`].
     ///
     /// # Arguments
-    /// - `idp_id`: The unique identifier of the IdP this authenticator is for.
+    /// - `idp_id`: The unique identifier of the identity provider this authenticator is for. An empty id is `None`.
     /// - `audiences`: The audiences to validate the token against. If empty, no audience validation is done.
-    /// - `client`: The Kubernetes client to use. If `None`, the default client will be used.
+    /// - `client`: The Kubernetes client to use.
     ///
     /// # Errors
-    /// - `KubernetesConfigError`: If neither the local kubeconfig nor the in-cluster environment can be loaded
+    /// Does not fail; it returns a `Result` like
+    /// [`try_new_with_default_client`](Self::try_new_with_default_client).
     pub fn new_with_client(
         idp_id: Option<&str>,
         audiences: Vec<String>,
         client: kube::client::Client,
     ) -> Result<Self> {
         Ok(Self {
-            idp_id: idp_id.map(ToString::to_string),
+            idp_id: idp_id.filter(|id| !id.is_empty()).map(ToString::to_string),
             client,
             audiences,
             issuers: vec![],
@@ -223,8 +221,8 @@ impl Authenticator for KubernetesAuthenticator {
         }
     }
 
-    fn idp_id(&self) -> Option<&String> {
-        self.idp_id.as_ref()
+    fn idp_id(&self) -> Option<&str> {
+        self.idp_id.as_deref()
     }
 }
 
@@ -278,20 +276,17 @@ fn parse_review_status(
     };
 
     let subject = Subject::new(idp_id.map(ToString::to_string), subject_in_idp);
+    let user = KubernetesUser::builder()
+        .username_opt(user_info.username)
+        .uid_opt(user_info.uid)
+        .groups(user_info.groups.unwrap_or_default())
+        .extra(user_info.extra.unwrap_or_default())
+        .build();
 
-    let claims = serde_json::to_value(user_info.extra).unwrap_or_default();
     Ok(Authentication::builder()
-        .name(user_info.username)
-        .email(
-            claims
-                .get("email")
-                .and_then(|v| v.as_str().map(ToString::to_string)),
-        )
         .subject(subject)
-        .principal_type(Some(crate::PrincipalType::Application))
-        .token_header(None)
-        .claims(claims)
         .audiences(actual_audiences.into_iter().collect())
+        .identity(user)
         .build())
 }
 
@@ -350,6 +345,23 @@ mod test {
             kube::client::Client::new(service, "default"),
         )
         .unwrap()
+    }
+
+    /// An empty IdP id is unset, as for [`Subject::new`] and the JWKS authenticator.
+    #[tokio::test]
+    async fn test_empty_idp_id_is_none() {
+        let service = tower::service_fn(|_: http::Request<kube::client::Body>| {
+            std::future::pending::<
+                std::io::Result<http::Response<http_body_util::Full<bytes::Bytes>>>,
+            >()
+        });
+        let client = kube::client::Client::new(service, "default");
+        let authenticator =
+            KubernetesAuthenticator::new_with_client(Some(""), vec![], client.clone()).unwrap();
+        assert_eq!(authenticator.idp_id(), None);
+        let authenticator =
+            KubernetesAuthenticator::new_with_client(Some("k8s"), vec![], client).unwrap();
+        assert_eq!(authenticator.idp_id(), Some("k8s"));
     }
 
     #[tokio::test]
@@ -470,18 +482,34 @@ mod test {
         )
         .unwrap();
 
+        let crate::Identity::Kubernetes(user) = payload.identity() else {
+            panic!("expected a Kubernetes user");
+        };
         assert_eq!(
-            payload.full_name(),
+            user.username(),
             Some("system:serviceaccount:my-namespace:my-serviceaccount")
         );
+        assert_eq!(user.uid(), Some("0e79c2ec-32eb-4a46-ab9b-f075fbbfbd43"));
+        assert_eq!(
+            user.groups(),
+            [
+                "system:serviceaccounts",
+                "system:serviceaccounts:my-namespace",
+                "system:authenticated"
+            ]
+        );
+        assert_eq!(
+            user.extra().get("authentication.kubernetes.io/pod-name"),
+            Some(&vec!["my-pod".to_string()])
+        );
+        assert!(payload.satisfies(
+            &crate::ClaimRule::any_of("authentication.kubernetes.io/pod-name", ["my-pod"]).unwrap()
+        ));
         assert_eq!(
             payload.subject().subject_in_idp(),
             "0e79c2ec-32eb-4a46-ab9b-f075fbbfbd43"
         );
-        assert_eq!(
-            payload.subject().idp_id(),
-            Some("my-k8s-cluster".to_string()).as_ref()
-        );
+        assert_eq!(payload.subject().idp_id(), Some("my-k8s-cluster"));
         assert_eq!(
             payload.audiences(),
             &HashSet::from(["https://kubernetes.default.svc".to_string()])
@@ -528,14 +556,9 @@ mod test {
         )
         .unwrap();
 
-        // Subject is the username; display name is unaffected.
         assert_eq!(
             payload.subject().subject_in_idp(),
             "system:serviceaccount:my-namespace:my-serviceaccount"
-        );
-        assert_eq!(
-            payload.full_name(),
-            Some("system:serviceaccount:my-namespace:my-serviceaccount")
         );
     }
 
@@ -558,7 +581,7 @@ mod test {
     #[test]
     fn test_parse_review_status_rejects_empty_subject() {
         // A present-but-empty subject field must be rejected, not turned into
-        // an empty subject (`kubernetes~`).
+        // an empty subject.
         for (source, user) in [
             (
                 KubernetesSubjectSource::Uid,

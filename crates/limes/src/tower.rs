@@ -47,6 +47,7 @@ pub struct AuthenticationLayer<A> {
 
 impl<A> AuthenticationLayer<A> {
     /// Create a layer that authenticates requests with `authenticator`.
+    #[must_use]
     pub fn new(authenticator: A) -> Self {
         Self {
             authenticator: Arc::new(authenticator),
@@ -253,7 +254,9 @@ fn bearer_token(value: Option<&HeaderValue>) -> Result<&str, Rejection> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Authentication, Subject, error::Result, introspect::IntrospectionResult};
+    use crate::{
+        Authentication, Subject, VerifiedClaims, error::Result, introspect::IntrospectionResult,
+    };
     use ::tower::{ServiceExt, service_fn};
     use http_body_util::BodyExt;
     use std::convert::Infallible;
@@ -270,12 +273,8 @@ mod tests {
         ) -> Result<Authentication> {
             match token {
                 "valid" => Ok(Authentication::builder()
-                    .token_header(None)
-                    .claims(serde_json::json!({}))
-                    .name(None)
-                    .email(None)
                     .subject(Subject::new(Some("idp".to_string()), "alice".to_string()))
-                    .principal_type(None)
+                    .identity(VerifiedClaims::default())
                     .build()),
                 "unhandled" => Err(Error::NoAuthenticatorCanHandleToken),
                 "internal" => Err(Error::internal("boom", "boom")),
@@ -295,7 +294,7 @@ mod tests {
             true
         }
 
-        fn idp_id(&self) -> Option<&String> {
+        fn idp_id(&self) -> Option<&str> {
             None
         }
     }

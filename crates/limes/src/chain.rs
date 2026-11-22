@@ -10,6 +10,7 @@ use crate::{
 /// To include custom [`Authenticator`]s, create a new enum and implement the [`Authenticator`] trait
 /// for it.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum AuthenticatorEnum {
     #[cfg(feature = "kubernetes")]
     Kubernetes(crate::kubernetes::KubernetesAuthenticator),
@@ -23,7 +24,7 @@ pub enum AuthenticatorEnum {
 /// to authenticate the token.
 ///
 /// We strongly recommend setting different `idp_id`s
-/// for authenticators. Subject ids between different `IdPs` can overlap.
+/// for authenticators. Subject ids between different identity providers can overlap.
 #[derive(Debug, Clone)]
 pub struct AuthenticatorChain<T>
 where
@@ -65,7 +66,7 @@ where
     }
 
     /// Returns the `idp_id` of the first authenticator in the chain, or `None` if the chain is empty.
-    fn idp_id(&self) -> Option<&String> {
+    fn idp_id(&self) -> Option<&str> {
         self.authenticators.first().and_then(Authenticator::idp_id)
     }
 
@@ -129,7 +130,7 @@ impl Authenticator for AuthenticatorEnum {
         }
     }
 
-    fn idp_id(&self) -> Option<&String> {
+    fn idp_id(&self) -> Option<&str> {
         match self {
             #[cfg(feature = "kubernetes")]
             Self::Kubernetes(authenticator) => authenticator.idp_id(),

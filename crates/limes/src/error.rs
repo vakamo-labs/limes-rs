@@ -56,8 +56,6 @@ impl std::fmt::Display for RejectionReason {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Could not parse subject from string: {subject}")]
-    InvalidSubject { subject: String },
     #[cfg(feature = "kubernetes")]
     #[error("Failed get kubernetes configuration: {0}")]
     KubernetesConfigError(#[source] kube::Error),
@@ -132,12 +130,14 @@ impl Error {
         }
     }
 
+    #[must_use]
     pub fn unauthenticated(reason: impl Into<String>) -> Self {
         Self::Unauthenticated {
             reason: reason.into(),
         }
     }
 
+    #[must_use]
     pub fn internal(
         reason: impl Into<String>,
         error: impl Into<Box<dyn std::error::Error + Send + Sync>>,
@@ -175,8 +175,7 @@ impl Error {
             Self::InternalError { .. } | Self::InvalidScope { .. } | Self::UrlParseError(_) => {
                 ErrorKind::Internal
             }
-            Self::InvalidSubject { .. }
-            | Self::Unauthenticated { .. }
+            Self::Unauthenticated { .. }
             | Self::TokenRejected { .. }
             | Self::NoAuthenticatorCanHandleToken => ErrorKind::Unauthenticated,
         }
@@ -188,6 +187,9 @@ impl Error {
 /// A server answers [`Unauthenticated`](Self::Unauthenticated) with HTTP 401 / gRPC
 /// `UNAUTHENTICATED`, [`Unavailable`](Self::Unavailable) with 503 / `UNAVAILABLE`, and
 /// [`Internal`](Self::Internal) with 500 / `INTERNAL`.
+///
+/// A server maps every kind to an answer, so limes adds a kind only in a breaking release,
+/// and a `match` needs no wildcard arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
     /// The token is not accepted. Retrying with the same token does not help.
