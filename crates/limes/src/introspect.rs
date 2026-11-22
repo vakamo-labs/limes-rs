@@ -2,6 +2,7 @@ use jsonwebtoken::Header;
 use serde::Deserialize;
 use std::collections::HashSet;
 
+/// What a token says about itself, read without verifying it.
 #[derive(Debug, PartialEq, Eq, Clone)]
 #[non_exhaustive]
 pub enum IntrospectionResult {
@@ -19,68 +20,51 @@ pub enum IntrospectionResult {
     Unknown,
 }
 
-/// Introspect a token to determine its type and issuer.
-///
-/// **Warning**
-/// This function does not validate the token, it only introspects it.
-#[must_use]
-pub fn introspect(token: &str) -> IntrospectionResult {
-    let header = jsonwebtoken::decode_header(token);
-    match header {
-        Ok(header) => {
-            let result: JWTBearer = match jsonwebtoken::dangerous::insecure_decode(token) {
-                Ok(token_data) => token_data.claims,
-                Err(e) => {
-                    tracing::trace!(
-                        "Token is not a JWT Bearer token. Could not decode claims: {e}"
-                    );
-
-                    return IntrospectionResult::Unknown;
-                }
-            };
-
-            IntrospectionResult::JWTBearer {
-                header,
-                iss: result.iss.into_set(),
-                aud: result.aud.into_set(),
-            }
-        }
+/// Introspect a token to determine its type and issuer. Does not verify the token.
+pub(crate) fn introspect(token: &str) -> IntrospectionResult {
+    match jsonwebtoken::dangerous::insecure_decode::<RoutingClaims>(token) {
+        Ok(token_data) => IntrospectionResult::JWTBearer {
+            header: token_data.header,
+            iss: token_data.claims.iss.into_set(),
+            aud: token_data.claims.aud.into_set(),
+        },
         Err(e) => {
-            tracing::trace!("Token is not a JWT Bearer token. Could not decode header: {e}");
+            tracing::trace!("Token is not a JWT Bearer token: {e}");
             IntrospectionResult::Unknown
         }
     }
 }
 
 #[derive(Deserialize)]
-pub(crate) struct JWTBearer {
+struct RoutingClaims {
     // Only `iss` and `aud` are needed to classify and route a token. `sub` is intentionally
     // not required here so introspection does not reject otherwise-valid tokens (e.g. those
     // relying on a `subject_claim` override such as `oid`); the subject is resolved later
     // during full authentication.
-    iss: Issuer,
+    iss: OneOrMany,
     #[serde(default)]
-    aud: Audience,
+    aud: OneOrMany,
 }
 
+/// A claim that holds one string or an array of strings, such as `iss` and `aud`.
 #[derive(Deserialize)]
 #[serde(untagged)]
-enum Audience {
-    Single(String),
-    Multiple(HashSet<String>),
+enum OneOrMany {
+    One(String),
+    Many(HashSet<String>),
 }
 
-impl Default for Audience {
+impl Default for OneOrMany {
     fn default() -> Self {
-        Audience::Multiple(HashSet::new())
+        Self::Many(HashSet::new())
     }
 }
 
-impl Audience {
+impl OneOrMany {
     fn into_set(self) -> HashSet<String> {
         match self {
-            Audience::Single(s) => HashSet::from([s]),
-            Audience::Multiple(s) => s,
+            Self::One(value) => HashSet::from([value]),
+            Self::Many(values) => values,
         }
     }
 }
@@ -89,31 +73,74 @@ impl Audience {
 /// Handles both single-string (`"aud": "app"`) and array (`"aud": ["app1", "app2"]`) forms.
 pub(crate) fn parse_aud(value: Option<&serde_json::Value>) -> HashSet<String> {
     value
-        .and_then(|v| Audience::deserialize(v).ok())
-        .map(Audience::into_set)
+        .and_then(|v| OneOrMany::deserialize(v).ok())
+        .map(OneOrMany::into_set)
         .unwrap_or_default()
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum Issuer {
-    Single(String),
-    Multiple(HashSet<String>),
-}
-
-impl Issuer {
-    fn into_set(self) -> HashSet<String> {
-        match self {
-            Issuer::Single(s) => HashSet::from([s]),
-            Issuer::Multiple(s) => s,
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use tracing_test::traced_test;
+
+    fn unsigned_token(header: &str, payload: &str) -> String {
+        format!(
+            "{}.{}.signature",
+            URL_SAFE_NO_PAD.encode(header),
+            URL_SAFE_NO_PAD.encode(payload)
+        )
+    }
+
+    #[test]
+    fn test_introspect_decodes_escaped_strings() {
+        let token = unsigned_token(
+            r#"{"alg":"RS256","kid":"k1"}"#,
+            r#"{"iss":"https:\/\/idp.example","aud":["a\u0062c","abc"]}"#,
+        );
+        assert_eq!(
+            introspect(&token),
+            IntrospectionResult::JWTBearer {
+                header: jsonwebtoken::decode_header(&token).unwrap(),
+                iss: HashSet::from(["https://idp.example".to_string()]),
+                aud: HashSet::from(["abc".to_string()]),
+            }
+        );
+    }
+
+    #[test]
+    fn test_introspect_header_is_the_header_jsonwebtoken_decodes() {
+        let token = unsigned_token(
+            r#"{"alg":"ES256","kid":"k1","typ":"at+jwt","x5t":"thumb","extra":1}"#,
+            r#"{"iss":"https://idp.example"}"#,
+        );
+        let IntrospectionResult::JWTBearer { header, .. } = introspect(&token) else {
+            panic!("expected a JWT bearer token");
+        };
+        assert_eq!(header, jsonwebtoken::decode_header(&token).unwrap());
+    }
+
+    #[test]
+    fn test_introspect_unknown_formats() {
+        let jwt = unsigned_token(r#"{"alg":"RS256"}"#, r#"{"iss":"i"}"#);
+        for token in [
+            String::new(),
+            "not-a-jwt".to_string(),
+            "a.b".to_string(),
+            // Four parts: the header part holds a `.`, which is not base64.
+            format!("x.{jwt}"),
+            unsigned_token(r#"{"alg":"RS256"}"#, r#"{"aud":"a"}"#),
+            unsigned_token(r#"{"alg":"RS256"}"#, r#"{"iss":1}"#),
+            unsigned_token(r#"{"alg":"RS256"}"#, r#"{"iss":"i","aud":null}"#),
+            unsigned_token(r#"{"alg":"none!"}"#, r#"{"iss":"i"}"#),
+        ] {
+            assert_eq!(introspect(&token), IntrospectionResult::Unknown, "{token}");
+        }
+        assert!(matches!(
+            introspect(&jwt),
+            IntrospectionResult::JWTBearer { .. }
+        ));
+    }
 
     #[test]
     fn test_parse_aud_single_string() {

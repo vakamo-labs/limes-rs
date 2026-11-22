@@ -147,7 +147,7 @@ use std::collections::HashMap;
 use limes::{
     error::{Error, Result},
     introspect::IntrospectionResult,
-    Authentication, Authenticator, Subject, VerifiedClaims,
+    Authentication, Authenticator, Subject, Token, VerifiedClaims,
 };
 
 /// Accepts the API keys of known clients.
@@ -157,10 +157,10 @@ struct ApiKeys {
 }
 
 impl Authenticator for ApiKeys {
-    async fn authenticate(&self, token: &str, _: &IntrospectionResult) -> Result<Authentication> {
+    async fn authenticate(&self, token: &Token<'_>) -> Result<Authentication> {
         let client = self
             .clients
-            .get(token)
+            .get(token.as_str())
             .ok_or_else(|| Error::unauthenticated("Unknown API key"))?;
         let mut claims = serde_json::Map::new();
         claims.insert("client".to_string(), client.clone().into());
@@ -170,8 +170,8 @@ impl Authenticator for ApiKeys {
             .build())
     }
 
-    fn can_handle_token(&self, _: &str, introspection: &IntrospectionResult) -> bool {
-        matches!(introspection, IntrospectionResult::Unknown)
+    fn can_handle_token(&self, token: &Token<'_>) -> bool {
+        matches!(token.introspection(), IntrospectionResult::Unknown)
     }
 
     fn idp_id(&self) -> Option<&str> {
@@ -219,11 +219,13 @@ The minimum supported Rust version is 1.95.
 | `format_subject`, `parse_subject`, `Error::InvalidSubject` | Removed. Choose a string form of `Subject` in your application. |
 | `claims(key)`, `all_claims()` | For `Identity::Claims(claims)`: `claims.as_json().get(key)` and `claims.as_json()`; `claims.claim(path)` reads nested claims. For `Identity::Kubernetes(user)`: `user.extra()`. To test a claim rule, `satisfies(rule)`. |
 | `issuer()`, `scopes()`, `expires_at()`, `issued_at()`, `not_before()` | The same methods on `VerifiedClaims`. |
-| `token_header()` | `introspect::introspect(token)` returns the header of a JWT. |
+| `token_header()` | The `header` of `Token::new(token).introspection()`, for a JWT. |
 | `Authentication::idp_id()` | `subject().idp_id()`. `Subject::idp_id()` and `Authenticator::idp_id()` return `Option<&str>`. |
 | `Authentication::builder()` with `token_header`, `claims`, `name`, `email`, `principal_type`, `roles` | `.subject(..)` and `.identity(..)` with `VerifiedClaims::new(map)`, `VerifiedClaims::try_from(value)` or a `KubernetesUser`; `audiences` is optional. |
 | `Error::RefreshOpenIDWellKnownConfigError` | `Error::FetchJwksError`. `Error::kind()` tells 401, 503 and 500 apart. |
 | `none_of` with a `Separator::Literal` made of whitespace | Refused with `ClaimRuleError::WhitespaceLiteralOnDeny`. Use `Separator::Whitespace`. |
+| `Authenticator::authenticate(token, introspection)` and `can_handle_token(token, introspection)` | `authenticate(&Token)` and `can_handle_token(&Token)`. `Token::as_str()` is the token, `Token::introspection()` reads it on first use. |
+| `introspect::introspect(token)` | `Token::new(token).introspection().clone()`. |
 | Exhaustive `match` on `IntrospectionResult`, `AuthenticatorEnum`, `KubernetesSubjectSource` | Add a wildcard arm. Patterns of `IntrospectionResult::JWTBearer` need `..`. |
 | serde_json's `preserve_order` feature, turned on by limes for your whole build | limes leaves it off, so JSON objects sort their keys. If your code needs objects in insertion order, turn the feature on in your own `Cargo.toml`. |
 

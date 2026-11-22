@@ -1,7 +1,6 @@
 use crate::{
-    Authentication, Authenticator,
+    Authentication, Authenticator, Token,
     error::{Error, Result},
-    introspect::IntrospectionResult,
 };
 
 /// Enum to hold the different authenticators.
@@ -51,14 +50,10 @@ where
     /// # Errors
     /// - No authenticator in the chain can handle the token.
     /// - The matching authenticator rejects the token.
-    async fn authenticate(
-        &self,
-        token: &str,
-        introspection: &IntrospectionResult,
-    ) -> Result<Authentication> {
+    async fn authenticate(&self, token: &Token<'_>) -> Result<Authentication> {
         for authenticator in &self.authenticators {
-            if authenticator.can_handle_token(token, introspection) {
-                return authenticator.authenticate(token, introspection).await;
+            if authenticator.can_handle_token(token) {
+                return authenticator.authenticate(token).await;
             }
         }
 
@@ -80,10 +75,10 @@ where
     }
 
     /// Returns `true` if any authenticator in the chain can handle the token.
-    fn can_handle_token(&self, token: &str, introspection_result: &IntrospectionResult) -> bool {
+    fn can_handle_token(&self, token: &Token<'_>) -> bool {
         self.authenticators
             .iter()
-            .any(|authenticator| authenticator.can_handle_token(token, introspection_result))
+            .any(|authenticator| authenticator.can_handle_token(token))
     }
 }
 
@@ -115,18 +110,12 @@ where
 
 #[cfg(any(feature = "kubernetes", feature = "jwks"))]
 impl Authenticator for AuthenticatorEnum {
-    async fn authenticate(
-        &self,
-        token: &str,
-        introspection: &IntrospectionResult,
-    ) -> Result<Authentication> {
+    async fn authenticate(&self, token: &Token<'_>) -> Result<Authentication> {
         match self {
             #[cfg(feature = "kubernetes")]
-            Self::Kubernetes(authenticator) => {
-                authenticator.authenticate(token, introspection).await
-            }
+            Self::Kubernetes(authenticator) => authenticator.authenticate(token).await,
             #[cfg(feature = "jwks")]
-            Self::Jwt(authenticator) => authenticator.authenticate(token, introspection).await,
+            Self::Jwt(authenticator) => authenticator.authenticate(token).await,
         }
     }
 
@@ -139,14 +128,12 @@ impl Authenticator for AuthenticatorEnum {
         }
     }
 
-    fn can_handle_token(&self, token: &str, introspection_result: &IntrospectionResult) -> bool {
+    fn can_handle_token(&self, token: &Token<'_>) -> bool {
         match self {
             #[cfg(feature = "kubernetes")]
-            Self::Kubernetes(authenticator) => {
-                authenticator.can_handle_token(token, introspection_result)
-            }
+            Self::Kubernetes(authenticator) => authenticator.can_handle_token(token),
             #[cfg(feature = "jwks")]
-            Self::Jwt(authenticator) => authenticator.can_handle_token(token, introspection_result),
+            Self::Jwt(authenticator) => authenticator.can_handle_token(token),
         }
     }
 }

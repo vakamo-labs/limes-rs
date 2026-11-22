@@ -3,7 +3,7 @@
 use crate::identity::{ISSUER_CLAIM, SCOPE_CLAIM, SCP_CLAIM};
 use crate::introspect::IntrospectionResult;
 use crate::{
-    Authentication, Authenticator, Subject, VerifiedClaims,
+    Authentication, Authenticator, Subject, Token, VerifiedClaims,
     claims::{ClaimOperator, ClaimRule, Separator, navigate},
     error::RejectionReason,
     error::{Error, Result},
@@ -273,13 +273,8 @@ impl JWKSWebAuthenticator {
 }
 
 impl Authenticator for JWKSWebAuthenticator {
-    async fn authenticate(
-        &self,
-        token: &str,
-        introspection: &IntrospectionResult,
-    ) -> Result<Authentication> {
-        // Reuse the header decoded during introspection instead of decoding the token again.
-        let IntrospectionResult::JWTBearer { header, .. } = introspection else {
+    async fn authenticate(&self, token: &Token<'_>) -> Result<Authentication> {
+        let IntrospectionResult::JWTBearer { header, .. } = token.introspection() else {
             return Err(Error::JWTDecodeError {
                 reason: "Token is not a JWT bearer token.".to_string(),
             });
@@ -289,7 +284,7 @@ impl Authenticator for JWKSWebAuthenticator {
         })?;
         let key = self.inner.keys.get(key_id).await?;
         let token_data = authenticate_jwt(
-            token,
+            token.as_str(),
             header,
             &key,
             &self.inner.audiences,
@@ -305,12 +300,12 @@ impl Authenticator for JWKSWebAuthenticator {
         self.inner.idp_id.as_deref()
     }
 
-    fn can_handle_token(&self, token: &str, introspection_result: &IntrospectionResult) -> bool {
-        if token.is_empty() {
+    fn can_handle_token(&self, token: &Token<'_>) -> bool {
+        if token.as_str().is_empty() {
             return false;
         }
 
-        match introspection_result {
+        match token.introspection() {
             IntrospectionResult::JWTBearer {
                 iss,
                 aud,
@@ -1163,7 +1158,7 @@ mod test {
 
         let (token, _) = sign(&enc, serde_json::json!({ "iss": issuer, "sub": "u" }));
         let err = authenticator
-            .authenticate(&token, &crate::introspect::introspect(&token))
+            .authenticate(&Token::new(&token))
             .await
             .unwrap_err();
         assert_eq!(err.kind(), crate::error::ErrorKind::Unavailable);
@@ -1187,7 +1182,7 @@ mod test {
 
         let (token, _) = sign(&enc, serde_json::json!({ "iss": issuer, "sub": "u" }));
         let err = authenticator
-            .authenticate(&token, &crate::introspect::introspect(&token))
+            .authenticate(&Token::new(&token))
             .await
             .unwrap_err();
         assert_eq!(
@@ -1202,7 +1197,7 @@ mod test {
             serde_json::json!({ "iss": issuer, "aud": AUD, "sub": "u" }),
         );
         let auth = authenticator
-            .authenticate(&token, &crate::introspect::introspect(&token))
+            .authenticate(&Token::new(&token))
             .await
             .unwrap();
         assert_eq!(auth.subject().subject_in_idp(), "u");
@@ -1243,7 +1238,7 @@ mod test {
         )
         .unwrap();
         let err = authenticator
-            .authenticate(&token, &crate::introspect::introspect(&token))
+            .authenticate(&Token::new(&token))
             .await
             .unwrap_err();
         assert_eq!(
@@ -1274,7 +1269,7 @@ mod test {
         )
         .unwrap();
         let err = authenticator
-            .authenticate(&token, &crate::introspect::introspect(&token))
+            .authenticate(&Token::new(&token))
             .await
             .unwrap_err();
         assert_eq!(
