@@ -1,26 +1,23 @@
 use axum::{Extension, response::IntoResponse, routing::get};
 use limes::{
-    Authentication, AuthenticatorChain, AuthenticatorEnum, format_subject,
-    jwks::JWKSWebAuthenticator, kubernetes::KubernetesAuthenticator, tower::AuthenticationLayer,
+    Authentication, AuthenticatorChain, AuthenticatorEnum, jwks::JWKSWebAuthenticator,
+    kubernetes::KubernetesAuthenticator, tower::AuthenticationLayer,
 };
-
-// We recommend using a character that is never used in subject ids
-const IDP_SEPARATOR: Option<char> = Some('~');
 
 #[tokio::main]
 async fn main() {
     let oidc_authenticator = JWKSWebAuthenticator::new(
-        "https://accounts.google.com", // Must provide ./well-known/openid-configuration
+        "https://accounts.google.com", // Must provide /.well-known/openid-configuration
         Some(std::time::Duration::from_secs(10 * 60)), // Refresh JWKS keys every 10 minutes
     )
     .await
     .unwrap()
-    .set_idp_id("oidc") // Unique identifier for this IdP. Must never contain the `IDP_SEPARATOR`
+    .set_idp_id("oidc") // Unique identifier for this IdP
     .set_accepted_audiences(vec!["my-app".to_string()]); // Acceptable audiences (optional)
 
     // Uses the default Kubernetes client. Other constructors are available that accept a custom client.
     let kubernetes_authenticator = KubernetesAuthenticator::try_new_with_default_client(
-        Some("kubernetes"), // Unique identifier for this IdP. Must never contain the `IDP_SEPARATOR`
+        Some("kubernetes"), // Unique identifier for this IdP
         vec![],             // Don't validate the audience
     )
     .await
@@ -45,5 +42,11 @@ async fn main() {
 }
 
 async fn whoami(Extension(auth): Extension<Authentication>) -> impl IntoResponse {
-    format!("Hello, {}!", format_subject(auth.subject(), IDP_SEPARATOR))
+    let subject = auth.subject();
+    // The subject id is unique within its IdP, so the pair identifies the user.
+    format!(
+        "Hello, {} from {}!",
+        subject.subject_in_idp(),
+        subject.idp_id().unwrap_or("an unnamed IdP")
+    )
 }

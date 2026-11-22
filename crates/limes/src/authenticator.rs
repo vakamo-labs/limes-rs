@@ -1,41 +1,20 @@
-use crate::{Subject, error::Result, introspect::IntrospectionResult};
+use crate::{Identity, Subject, error::Result, introspect::IntrospectionResult};
 use core::{future::Future, marker::Sync};
-pub(crate) use jsonwebtoken::Header;
 use std::collections::HashSet;
 use std::fmt::Debug;
 use typed_builder::TypedBuilder;
-
-const ISSUER_CLAIM: &str = "iss";
-const EXPIRES_CLAIM: &str = "exp";
-const ISSUED_AT_CLAIM: &str = "iat";
-const NOT_BEFORE_CLAIM: &str = "nbf";
-/// The space-delimited OAuth `scope` claim. Shared with the JWKS authenticator so the key
-/// is defined in exactly one place.
-pub(crate) const SCOPE_CLAIM: &str = "scope";
-/// Array-shaped alternative to `scope` emitted by some IdPs; consulted when `scope` is absent.
-pub(crate) const SCP_CLAIM: &str = "scp";
-
-/// The `scope` claim, or `scp` if `scope` carries no scopes.
-///
-/// Resolved through [`crate::claims::resolve`], the one owner of that choice, so the scope
-/// requirement and [`Authentication::scopes`] always read the same claim.
-pub(crate) fn scope_claim(claims: &serde_json::Value) -> Option<&serde_json::Value> {
-    crate::claims::resolve(claims, [SCOPE_CLAIM, SCP_CLAIM])
-}
 
 pub trait Authenticator
 where
     Self: Send + Sync + Clone,
 {
     /// Authenticate a token. This must validate the tokens signature and claims.
-    /// For opaque tokens, handlers may connect to the `IdP` to validate the token.
+    /// For opaque tokens, handlers may connect to the identity provider to validate the token.
     ///
     /// `introspection` must be the result of [`introspect`](`crate::introspect::introspect`)
-    /// for `token`. The caller computes it once and passes it in (the tower layer does
-    /// this for you). [`AuthenticatorChain`](`crate::AuthenticatorChain`) does not introspect;
-    /// it forwards the value it was given to the selected authenticator. This lets
-    /// implementations reuse the already-decoded header and claims instead of decoding the
-    /// token a second time.
+    /// for `token`. The caller computes it once and passes it in; the tower layer does this
+    /// for you. [`AuthenticatorChain`](`crate::AuthenticatorChain`) forwards it to the
+    /// authenticator it selects.
     ///
     /// # Errors
     /// - Token is not valid.
@@ -50,282 +29,84 @@ where
     /// This should be a quick check that doesn't involve cryptographic operations.
     fn can_handle_token(&self, token: &str, introspection_result: &IntrospectionResult) -> bool;
 
-    /// Returns an id that uniquely identifies the `IdP` this authenticator is for.
-    fn idp_id(&self) -> Option<&String>;
+    /// An id that uniquely identifies the identity provider of this authenticator.
+    fn idp_id(&self) -> Option<&str>;
 
     /// Collects the IdP identifier(s) associated with this authenticator.
     ///
     /// By default this yields a single-element vector containing the result of `self.idp_id()`
-    /// (converted to a `&str`) for a standalone authenticator. Implementations that represent
-    /// a chain of authenticators should return one element per child authenticator in chain order.
+    /// for a standalone authenticator. Implementations that represent a chain of
+    /// authenticators should return one element per child authenticator in chain order.
     ///
     /// # Returns
     ///
     /// A `Vec<Option<&str>>` where each element is the IdP identifier for one authenticator in the chain,
     /// or `None` when an authenticator does not have an IdP identifier.
     fn idp_ids(&self) -> Vec<Option<&str>> {
-        vec![self.idp_id().map(String::as_str)]
+        vec![self.idp_id()]
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, TypedBuilder)]
 /// Information about a successful authentication.
 /// Use [`Authentication::subject()`] for a unique identifier of the user.
+#[derive(Debug, PartialEq, Eq, Clone, TypedBuilder)]
 pub struct Authentication {
-    // --------- Raw token data ---------
-    /// Header of the provided token if any.
-    /// Not all tokens have a header. JWTs do, but opaque tokens don't.
-    token_header: Option<Header>,
-    /// Claims of the provided token provided as a json Value.
-    /// This struct also contains some popular claims as strongly typed fields,
-    /// which should be preferred over accessing the claims directly.
-    claims: serde_json::Value,
-    /// Subject of the token - consists of a unique identifier of the idp
-    /// and the id of the subject in the idp.
+    /// Subject of the token: the id of the identity provider and the id of the subject there.
     subject: Subject,
-    /// Full name of the user intended for human use.
-    name: Option<String>,
-    /// Email of the user.
-    email: Option<String>,
-    /// The type of the principal making the request.
-    principal_type: Option<PrincipalType>,
-    /// Roles of the user extracted from the token if any.
-    #[builder(default)]
-    roles: Option<Vec<String>>,
-    /// Audiences of the token.
     #[builder(default)]
     audiences: HashSet<String>,
-}
-
-#[derive(Debug, PartialEq, Eq, Copy, Clone, Hash)]
-/// Type of the principal making the request.
-pub enum PrincipalType {
-    Human,
-    Application,
+    #[builder(setter(into))]
+    identity: Identity,
 }
 
 impl Authentication {
-    #[must_use]
-    /// Get the token header if it exists.
-    pub fn token_header(&self) -> Option<&Header> {
-        self.token_header.as_ref()
-    }
-
-    #[must_use]
-    /// Get the content of a claim from the token.
-    /// If the claim does not exist, this will return None.
-    pub fn claims(&self, key: &str) -> Option<&serde_json::Value> {
-        self.claims.get(key)
-    }
-
-    #[must_use]
-    /// Whether the token's claims satisfy `rule`.
-    ///
-    /// Reads the claims the way a required-claim rule on an authenticator does, so a rule
-    /// evaluated after authentication selects the same claim as one enforced during it.
-    pub fn satisfies(&self, rule: &crate::ClaimRule) -> bool {
-        rule.matches(&self.claims)
-    }
-
-    #[must_use]
     /// Get the subject of the user.
     /// Use this to uniquely identify the user.
+    #[must_use]
     pub fn subject(&self) -> &Subject {
         &self.subject
     }
 
+    /// The audiences of the token: every `aud` of a JWT, or for a Kubernetes token the
+    /// audiences the `TokenReview` validated.
     #[must_use]
-    /// Get the full name of the user.
-    /// This is intended for human use. It is not guaranteed to be unique and may change.
-    pub fn full_name(&self) -> Option<&str> {
-        self.name.as_deref()
-    }
-
-    #[must_use]
-    /// Get the type of the principal making the request.
-    /// This is estimated by the [`Authenticator`] implementation and may not be accurate in all cases.
-    pub fn principal_type(&self) -> Option<PrincipalType> {
-        self.principal_type
-    }
-
-    #[must_use]
-    /// Get the email of the user.
-    pub fn email(&self) -> Option<&str> {
-        self.email.as_deref()
-    }
-
-    /// Get the roles of the user that were extracted from the token if any.
-    #[must_use]
-    pub fn roles(&self) -> Option<&[String]> {
-        self.roles.as_deref()
-    }
-
-    #[must_use]
-    /// Get the audiences of the token.
     pub fn audiences(&self) -> &HashSet<String> {
         &self.audiences
     }
 
+    /// What the identity provider states about the subject: the claims of the token, or the
+    /// user of a Kubernetes `TokenReview`.
     #[must_use]
-    /// Get the IdP identifier of the subject, if present.
-    /// This is a convenience accessor that maps the `Option<&String>` returned by
-    /// [`Subject::idp_id`] to `Option<&str>`.
-    pub fn idp_id(&self) -> Option<&str> {
-        self.subject().idp_id().map(std::string::String::as_str)
+    pub fn identity(&self) -> &Identity {
+        &self.identity
     }
 
-    #[must_use]
-    /// Get the full set of claims as a JSON value.
+    /// Whether the identity satisfies `rule`.
     ///
-    /// For JWTs this is the decoded payload; for the Kubernetes authenticator it is the
-    /// `user.extra` map returned by the `TokenReview` API. Prefer the typed accessors where one
-    /// exists; use [`claims`](Self::claims) to read a single claim by key.
-    pub fn all_claims(&self) -> &serde_json::Value {
-        &self.claims
-    }
-
+    /// The rule reads the claims of [`Identity::Claims`] the way a required-claim rule of the
+    /// JWKS authenticator does. For [`Identity::Kubernetes`] it reads `user.extra`, where every
+    /// key holds a list of strings.
     #[must_use]
-    /// Get the issuer (`iss`) of the token, if present in the claims.
-    pub fn issuer(&self) -> Option<&str> {
-        self.claims
-            .get(ISSUER_CLAIM)
-            .and_then(serde_json::Value::as_str)
-    }
-
-    /// Get the scopes of the token from the `scope` claim, or `scp` if `scope` is absent.
-    ///
-    /// Values are read exactly as scope enforcement reads them: a lone string is split on
-    /// whitespace, while an array states one scope per element, so its strings are returned
-    /// whole and never split. Anything else (an object, a number, or an array holding
-    /// non-strings) is malformed and yields nothing. Returns an empty iterator if neither
-    /// claim is present.
-    pub fn scopes(&self) -> impl Iterator<Item = &str> {
-        let (items, split) = scope_claim(&self.claims)
-            .and_then(crate::claims::strings)
-            .unwrap_or((&[], false));
-        // `strings` rejects non-strings, so a malformed claim yields nothing — the same
-        // reading the scope requirement enforces.
-        crate::claims::ClaimValues::new(items, Some(&crate::claims::Separator::Whitespace), split)
-            .filter_map(|v| match v {
-                std::borrow::Cow::Borrowed(s) => Some(s),
-                std::borrow::Cow::Owned(_) => None,
-            })
-    }
-
-    #[must_use]
-    /// Get the expiry (`exp`) as seconds since the Unix epoch, if present in the claims.
-    pub fn expires_at(&self) -> Option<i64> {
-        self.claims
-            .get(EXPIRES_CLAIM)
-            .and_then(serde_json::Value::as_i64)
-    }
-
-    #[must_use]
-    /// Get the issued-at time (`iat`) as seconds since the Unix epoch, if present in the claims.
-    pub fn issued_at(&self) -> Option<i64> {
-        self.claims
-            .get(ISSUED_AT_CLAIM)
-            .and_then(serde_json::Value::as_i64)
-    }
-
-    #[must_use]
-    /// Get the not-before time (`nbf`) as seconds since the Unix epoch, if present in the claims.
-    pub fn not_before(&self) -> Option<i64> {
-        self.claims
-            .get(NOT_BEFORE_CLAIM)
-            .and_then(serde_json::Value::as_i64)
+    pub fn satisfies(&self, rule: &crate::ClaimRule) -> bool {
+        match &self.identity {
+            Identity::Claims(claims) => rule.matches(claims.as_json()),
+            Identity::Kubernetes(user) => rule.matches(&user.extra_as_json()),
+        }
     }
 }
 
 #[cfg(test)]
 mod test {
+    use std::collections::BTreeMap;
+
     use super::*;
-    use crate::Subject;
+    use crate::{KubernetesUser, Subject, VerifiedClaims};
 
     fn auth_with_claims(claims: serde_json::Value) -> Authentication {
         Authentication::builder()
-            .token_header(None)
-            .claims(claims)
-            .name(None)
-            .email(None)
             .subject(Subject::new(None, "sub".to_string()))
-            .principal_type(None)
+            .identity(VerifiedClaims::try_from(claims).unwrap())
             .build()
-    }
-
-    #[test]
-    fn test_metadata_accessors_present() {
-        let auth = auth_with_claims(serde_json::json!({
-            "iss": "https://issuer.example.com",
-            "exp": 1_730_052_519,
-            "iat": 1_730_048_619,
-            "nbf": 1_730_048_619,
-            "scope": "openid profile email",
-        }));
-
-        assert_eq!(auth.issuer(), Some("https://issuer.example.com"));
-        assert_eq!(auth.expires_at(), Some(1_730_052_519));
-        assert_eq!(auth.issued_at(), Some(1_730_048_619));
-        assert_eq!(auth.not_before(), Some(1_730_048_619));
-        assert_eq!(
-            auth.scopes().collect::<Vec<_>>(),
-            ["openid", "profile", "email"]
-        );
-        assert!(auth.all_claims().get("iss").is_some());
-    }
-
-    #[test]
-    fn test_scopes_accepts_array_claim() {
-        let auth = auth_with_claims(serde_json::json!({ "scope": ["openid", "email"] }));
-        assert_eq!(auth.scopes().collect::<Vec<_>>(), ["openid", "email"]);
-    }
-
-    #[test]
-    fn test_scopes_falls_back_to_scp() {
-        let auth = auth_with_claims(serde_json::json!({ "scp": ["openid", "email"] }));
-        assert_eq!(auth.scopes().collect::<Vec<_>>(), ["openid", "email"]);
-        let auth = auth_with_claims(serde_json::json!({ "scp": "openid email" }));
-        assert_eq!(auth.scopes().collect::<Vec<_>>(), ["openid", "email"]);
-        // `scope` present wins, even when `scp` is also present.
-        let auth = auth_with_claims(serde_json::json!({ "scope": "a", "scp": "b" }));
-        assert_eq!(auth.scopes().collect::<Vec<_>>(), ["a"]);
-    }
-
-    /// The array form of `scope` states one scope per element, so elements are not split.
-    #[test]
-    fn test_scopes_does_not_split_array_elements() {
-        let auth = auth_with_claims(serde_json::json!({ "scope": ["openid profile", "email"] }));
-        assert_eq!(
-            auth.scopes().collect::<Vec<_>>(),
-            ["openid profile", "email"]
-        );
-    }
-
-    #[test]
-    fn test_scopes_of_claim_with_numbers_or_booleans_are_empty_like_enforcement() {
-        let auth = auth_with_claims(serde_json::json!({ "scope": ["admin", 42, true] }));
-        assert_eq!(auth.scopes().count(), 0);
-        let auth = auth_with_claims(serde_json::json!({ "scope": 42 }));
-        assert_eq!(auth.scopes().count(), 0);
-    }
-
-    #[test]
-    fn test_scopes_of_malformed_claim_are_empty_like_enforcement() {
-        let auth = auth_with_claims(serde_json::json!({ "scope": ["admin", {"k": "v"}] }));
-        assert_eq!(auth.scopes().count(), 0);
-        let auth = auth_with_claims(serde_json::json!({ "scope": ["admin", null] }));
-        assert_eq!(auth.scopes().count(), 0);
-    }
-
-    #[test]
-    fn test_metadata_accessors_absent() {
-        let auth = auth_with_claims(serde_json::json!({ "sub": "x" }));
-
-        assert_eq!(auth.issuer(), None);
-        assert_eq!(auth.expires_at(), None);
-        assert_eq!(auth.issued_at(), None);
-        assert_eq!(auth.not_before(), None);
-        assert_eq!(auth.scopes().count(), 0);
     }
 
     #[test]
@@ -351,5 +132,28 @@ mod test {
         assert!(!auth.satisfies(&rule));
         let absent = crate::ClaimRule::exists("azp", false).unwrap();
         assert!(auth.satisfies(&absent));
+    }
+
+    #[test]
+    fn test_satisfies_reads_the_extra_of_a_kubernetes_user() {
+        let user = KubernetesUser::builder()
+            .username("system:serviceaccount:ns:sa")
+            .groups(vec!["system:serviceaccounts".to_string()])
+            .extra(BTreeMap::from([(
+                "team".to_string(),
+                vec!["data".to_string()],
+            )]))
+            .build();
+        let auth = Authentication::builder()
+            .subject(Subject::new(
+                Some("kubernetes".to_string()),
+                "uid".to_string(),
+            ))
+            .identity(user)
+            .build();
+
+        assert!(auth.satisfies(&crate::ClaimRule::any_of("team", ["data"]).unwrap()));
+        // `groups` is a field of the user, not a key of `extra`.
+        assert!(auth.satisfies(&crate::ClaimRule::exists("groups", false).unwrap()));
     }
 }

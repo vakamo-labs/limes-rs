@@ -7,9 +7,9 @@ homepage = { workspace = true }
 repository = { workspace = true }
 rust-version = { workspace = true }
 license = { workspace = true }
-description = """
-Limes is a multi-tenant capable Authentication middleware for OAuth2.0 and Open ID Connect, usable as a tower layer with axum and tonic.
-"""
+description = "Bearer-token authentication for axum, tonic and tower: OpenID Connect JWTs with cached JWKS, Kubernetes TokenReview, several identity providers"
+keywords = ["authentication", "jwt", "oidc", "axum", "kubernetes"]
+categories = ["authentication", "web-programming::http-server", "network-programming"]
 
 [package.metadata.docs.rs]
 # document all features

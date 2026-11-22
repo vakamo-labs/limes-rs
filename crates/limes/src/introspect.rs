@@ -3,8 +3,10 @@ use serde::Deserialize;
 use std::collections::HashSet;
 
 #[derive(Debug, PartialEq, Eq, Clone)]
+#[non_exhaustive]
 pub enum IntrospectionResult {
     /// The token is a JWT Bearer token according to RFC 7523.
+    #[non_exhaustive]
     JWTBearer {
         /// Token header
         header: Header,

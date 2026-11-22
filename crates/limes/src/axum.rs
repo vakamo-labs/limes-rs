@@ -38,7 +38,9 @@ pub async fn authentication_middleware<T: Authenticator>(
 #[allow(deprecated)]
 mod tests {
     use super::*;
-    use crate::{Authentication, Subject, error::Result, introspect::IntrospectionResult};
+    use crate::{
+        Authentication, Subject, VerifiedClaims, error::Result, introspect::IntrospectionResult,
+    };
     use axum::{
         Extension, Router, body::Body, http::StatusCode, middleware::from_fn_with_state,
         routing::get,
@@ -59,12 +61,8 @@ mod tests {
                 return Err(crate::error::Error::unauthenticated("bad token"));
             }
             Ok(Authentication::builder()
-                .token_header(None)
-                .claims(serde_json::json!({}))
-                .name(None)
-                .email(None)
                 .subject(Subject::new(None, "alice".to_string()))
-                .principal_type(None)
+                .identity(VerifiedClaims::default())
                 .build())
         }
 
@@ -72,7 +70,7 @@ mod tests {
             true
         }
 
-        fn idp_id(&self) -> Option<&String> {
+        fn idp_id(&self) -> Option<&str> {
             None
         }
     }
