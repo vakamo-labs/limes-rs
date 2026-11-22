@@ -23,6 +23,8 @@ limes authenticates the requests of [Lakekeeper](https://github.com/lakekeeper/l
 ```toml
 [dependencies]
 limes = "0.8"
+axum = "0.8"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }
 ```
 
 ```rust,no_run
