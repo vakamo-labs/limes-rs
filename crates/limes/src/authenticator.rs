@@ -1,4 +1,4 @@
-use crate::{Identity, Subject, error::Result, introspect::IntrospectionResult};
+use crate::{Identity, Subject, Token, error::Result};
 use core::{future::Future, marker::Sync};
 use std::collections::HashSet;
 use std::fmt::Debug;
@@ -11,23 +11,18 @@ where
     /// Authenticate a token. This must validate the tokens signature and claims.
     /// For opaque tokens, handlers may connect to the identity provider to validate the token.
     ///
-    /// `introspection` must be the result of [`introspect`](`crate::introspect::introspect`)
-    /// for `token`. The caller computes it once and passes it in; the tower layer does this
-    /// for you. [`AuthenticatorChain`](`crate::AuthenticatorChain`) forwards it to the
-    /// authenticator it selects.
-    ///
     /// # Errors
     /// - Token is not valid.
     fn authenticate(
         &self,
-        token: &str,
-        introspection: &IntrospectionResult,
+        token: &Token<'_>,
     ) -> impl Future<Output = Result<Authentication>> + Send;
 
     /// Check if the authenticator can handle the token.
     /// This is used in the [`AuthenticatorChain`](`crate::AuthenticatorChain`) to determine which authenticator to use.
-    /// This should be a quick check that doesn't involve cryptographic operations.
-    fn can_handle_token(&self, token: &str, introspection_result: &IntrospectionResult) -> bool;
+    /// This should be a quick check that doesn't involve cryptographic operations, such as
+    /// one on [`Token::introspection`].
+    fn can_handle_token(&self, token: &Token<'_>) -> bool;
 
     /// An id that uniquely identifies the identity provider of this authenticator.
     fn idp_id(&self) -> Option<&str>;

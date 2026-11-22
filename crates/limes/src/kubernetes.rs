@@ -2,7 +2,7 @@
 
 use crate::introspect::IntrospectionResult;
 use crate::{
-    Authentication, Authenticator, KubernetesUser, Subject,
+    Authentication, Authenticator, KubernetesUser, Subject, Token,
     error::{Error, Result},
 };
 use k8s_openapi::api::authentication::v1::{
@@ -138,20 +138,16 @@ impl KubernetesAuthenticator {
 }
 
 impl Authenticator for KubernetesAuthenticator {
-    async fn authenticate(
-        &self,
-        token: &str,
-        introspection: &IntrospectionResult,
-    ) -> Result<Authentication> {
+    async fn authenticate(&self, token: &Token<'_>) -> Result<Authentication> {
         // The API server answers an empty token with 400, which reads as a problem of this
         // server.
-        if token.is_empty() {
+        if token.as_str().is_empty() {
             return Err(Error::unauthenticated("Token is empty"));
         }
 
         // If an issuer is set, the token must be JWT and the issuer must match
         if !self.issuers.is_empty() {
-            match introspection {
+            match token.introspection() {
                 IntrospectionResult::Unknown => {
                     return Err(Error::unauthenticated(
                         "Expected JWT token for Kubernetes Authenticator as issuer is set",
@@ -175,7 +171,7 @@ impl Authenticator for KubernetesAuthenticator {
             spec: TokenReviewSpec {
                 audiences: Some(self.audiences.clone()),
                 // An `Option` up to Kubernetes 1.35, a `String` from 1.36.
-                token: token.to_owned().into(),
+                token: token.as_str().to_owned().into(),
             },
             status: None,
         };
@@ -204,12 +200,12 @@ impl Authenticator for KubernetesAuthenticator {
         )
     }
 
-    fn can_handle_token(&self, token: &str, introspection_result: &IntrospectionResult) -> bool {
-        if token.is_empty() {
+    fn can_handle_token(&self, token: &Token<'_>) -> bool {
+        if token.as_str().is_empty() {
             return false;
         }
 
-        match introspection_result {
+        match token.introspection() {
             IntrospectionResult::Unknown => false,
             IntrospectionResult::JWTBearer {
                 iss,
@@ -376,7 +372,7 @@ mod test {
             (None, ErrorKind::Unavailable),
         ] {
             let err = authenticator_with_api(status)
-                .authenticate("token", &IntrospectionResult::Unknown)
+                .authenticate(&Token::new("token"))
                 .await
                 .unwrap_err();
             assert!(
@@ -405,7 +401,7 @@ mod test {
         // Without a deadline in `authenticate`, the paused clock has no timer to advance to.
         let err = tokio::time::timeout(
             2 * TOKEN_REVIEW_TIMEOUT,
-            authenticator.authenticate("token", &IntrospectionResult::Unknown),
+            authenticator.authenticate(&Token::new("token")),
         )
         .await
         .expect("authenticate has a deadline")
@@ -423,7 +419,7 @@ mod test {
     #[tokio::test]
     async fn test_empty_token_is_rejected_before_token_review() {
         let err = authenticator_with_api(None)
-            .authenticate("", &IntrospectionResult::Unknown)
+            .authenticate(&Token::new(""))
             .await
             .unwrap_err();
         assert_eq!(err.to_string(), "Authentication failed: Token is empty");

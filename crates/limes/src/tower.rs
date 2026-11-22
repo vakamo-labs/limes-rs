@@ -13,8 +13,8 @@
 //! `application/grpc+<format>`) are rejected with a `grpc-status` header, all other requests
 //! with an HTTP status code.
 
-use crate::Authenticator;
 use crate::error::{Error, ErrorKind};
+use crate::{Authenticator, Token};
 use bytes::Bytes;
 use http::{HeaderValue, Request, Response, StatusCode, header};
 use http_body_util::{Either, Full};
@@ -120,8 +120,7 @@ pub(crate) async fn authenticate<A: Authenticator, B>(
     request: &mut Request<B>,
 ) -> Result<(), Rejection> {
     let token = bearer_token(request.headers().get(header::AUTHORIZATION))?;
-    let introspection = crate::introspect::introspect(token);
-    match authenticator.authenticate(token, &introspection).await {
+    match authenticator.authenticate(&Token::new(token)).await {
         Ok(authentication) => {
             request.extensions_mut().insert(authentication);
             Ok(())
@@ -254,9 +253,7 @@ fn bearer_token(value: Option<&HeaderValue>) -> Result<&str, Rejection> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        Authentication, Subject, VerifiedClaims, error::Result, introspect::IntrospectionResult,
-    };
+    use crate::{Authentication, Subject, VerifiedClaims, error::Result};
     use ::tower::{ServiceExt, service_fn};
     use http_body_util::BodyExt;
     use std::convert::Infallible;
@@ -266,12 +263,8 @@ mod tests {
     struct MockAuthenticator;
 
     impl Authenticator for MockAuthenticator {
-        async fn authenticate(
-            &self,
-            token: &str,
-            _introspection: &IntrospectionResult,
-        ) -> Result<Authentication> {
-            match token {
+        async fn authenticate(&self, token: &Token<'_>) -> Result<Authentication> {
+            match token.as_str() {
                 "valid" => Ok(Authentication::builder()
                     .subject(Subject::new(Some("idp".to_string()), "alice".to_string()))
                     .identity(VerifiedClaims::default())
@@ -290,7 +283,7 @@ mod tests {
             }
         }
 
-        fn can_handle_token(&self, _: &str, _: &IntrospectionResult) -> bool {
+        fn can_handle_token(&self, _: &Token<'_>) -> bool {
             true
         }
 

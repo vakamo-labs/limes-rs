@@ -21,6 +21,7 @@ pub mod introspect;
 #[cfg(feature = "jwks")]
 pub mod jwks;
 mod subject;
+mod token;
 pub mod tower;
 
 #[cfg(feature = "kubernetes")]
@@ -32,6 +33,7 @@ pub use claims::{ClaimOperator, ClaimRule, ClaimRuleError, Separator};
 pub use error::RejectionReason;
 pub use identity::{Identity, KubernetesUser, VerifiedClaims};
 pub use subject::Subject;
+pub use token::Token;
 
 #[cfg(feature = "axum")]
 pub mod axum;

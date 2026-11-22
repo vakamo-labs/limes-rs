@@ -38,9 +38,7 @@ pub async fn authentication_middleware<T: Authenticator>(
 #[allow(deprecated)]
 mod tests {
     use super::*;
-    use crate::{
-        Authentication, Subject, VerifiedClaims, error::Result, introspect::IntrospectionResult,
-    };
+    use crate::{Authentication, Subject, Token, VerifiedClaims, error::Result};
     use axum::{
         Extension, Router, body::Body, http::StatusCode, middleware::from_fn_with_state,
         routing::get,
@@ -52,12 +50,8 @@ mod tests {
     struct AcceptValid;
 
     impl Authenticator for AcceptValid {
-        async fn authenticate(
-            &self,
-            token: &str,
-            _: &IntrospectionResult,
-        ) -> Result<Authentication> {
-            if token != "valid" {
+        async fn authenticate(&self, token: &Token<'_>) -> Result<Authentication> {
+            if token.as_str() != "valid" {
                 return Err(crate::error::Error::unauthenticated("bad token"));
             }
             Ok(Authentication::builder()
@@ -66,7 +60,7 @@ mod tests {
                 .build())
         }
 
-        fn can_handle_token(&self, _: &str, _: &IntrospectionResult) -> bool {
+        fn can_handle_token(&self, _: &Token<'_>) -> bool {
             true
         }
 
