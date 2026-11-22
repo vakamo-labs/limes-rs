@@ -14,6 +14,8 @@ categories = ["authentication", "web-programming::http-server", "network-program
 [package.metadata.docs.rs]
 # document all features
 all-features = true
+# The `kubernetes` feature needs a Kubernetes version, which a library leaves to the binary.
+features = ["k8s-openapi/latest"]
 
 [features]
 all = ["kubernetes", "rustls-tls", "jwks", "axum", "valuable"]
