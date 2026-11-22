@@ -176,7 +176,8 @@ impl Authenticator for KubernetesAuthenticator {
             metadata: ObjectMeta::default(),
             spec: TokenReviewSpec {
                 audiences: Some(self.audiences.clone()),
-                token: Some(token.to_string()),
+                // An `Option` up to Kubernetes 1.35, a `String` from 1.36.
+                token: token.to_owned().into(),
             },
             status: None,
         };
