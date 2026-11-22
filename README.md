@@ -223,6 +223,7 @@ The minimum supported Rust version is 1.95.
 | `Error::RefreshOpenIDWellKnownConfigError` | `Error::FetchJwksError`. `Error::kind()` tells 401, 503 and 500 apart. |
 | `none_of` with a `Separator::Literal` made of whitespace | Refused with `ClaimRuleError::WhitespaceLiteralOnDeny`. Use `Separator::Whitespace`. |
 | Exhaustive `match` on `IntrospectionResult`, `AuthenticatorEnum`, `KubernetesSubjectSource` | Add a wildcard arm. Patterns of `IntrospectionResult::JWTBearer` need `..`. |
+| serde_json's `preserve_order` feature, turned on by limes for your whole build | limes leaves it off, so JSON objects sort their keys. If your code needs objects in insertion order, turn the feature on in your own `Cargo.toml`. |
 
 limes 0.8 also moves to jsonwebtoken 12, kube 5.1 and k8s-openapi 0.29.
 
