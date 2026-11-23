@@ -195,8 +195,8 @@ pub enum ErrorKind {
     /// The token is not accepted. Retrying with the same token does not help.
     Unauthenticated,
     /// A backend needed to check the token, such as the identity provider or the
-    /// Kubernetes API, could not be reached. The token may be valid; the client should
-    /// retry later and keep the token.
+    /// Kubernetes API, could not be reached, or this server has too many checks running. The
+    /// token may be valid; the client should retry later and keep the token.
     Unavailable,
     /// This server is misconfigured or failed. Retrying does not help.
     Internal,

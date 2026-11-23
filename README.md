@@ -5,16 +5,16 @@
 [![Tests](https://github.com/vakamo-labs/limes-rs/actions/workflows/ci.yaml/badge.svg)](https://github.com/vakamo-labs/limes-rs/actions/workflows/ci.yaml)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-Bearer-token authentication middleware for `axum`, `tonic` and other [tower](https://docs.rs/tower) services. limes verifies OpenID Connect (OIDC) JWTs against the JWKS of your identity provider, and Kubernetes service account tokens with the `TokenReview` API. One server can accept tokens from several identity providers, and an optional cache answers repeated tokens from memory.
+limes is an extensible framework for bearer-token authentication in `axum`, `tonic` and other [tower](https://docs.rs/tower) services. It has two built-in authenticators. One verifies OpenID Connect (OIDC) JWTs against the JWKS of your identity provider. The other checks Kubernetes service account tokens with the `TokenReview` API. For API keys or other bearer tokens, implement the `Authenticator` trait.
 
-limes authenticates the requests of [Lakekeeper](https://github.com/lakekeeper/lakekeeper), an Apache Iceberg REST catalog.
+limes is built for multi-tenant servers. An `AuthenticatorChain` reads the issuer and audience of a token before it verifies anything, and gives the token to the first authenticator that accepts them. So one server can accept tokens from many identity providers or tenants, such as several Keycloak realms or Entra ID tenants. Each user's `Subject` holds the `idp_id` of the authenticator and the user's id in that identity provider. An optional cache answers repeated tokens from memory.
 
 ## Features
 
 - **JWT verification with cached keys.** limes finds the keys through `/.well-known/openid-configuration`, caches them and refreshes them in the background. A request for a known key never waits for a fetch, and the keys stay in use while the identity provider cannot be reached. Once keys have loaded, tokens with unknown key ids start at most one fetch every 30 seconds.
-- **Kubernetes service accounts** through the `TokenReview` API, with audience checks. At most 32 reviews run at the same time, so a flood of tokens cannot overload the API server.
+- **Kubernetes service accounts** through the `TokenReview` API, with audience checks. By default, each authenticator runs at most 32 reviews at the same time, so a flood of tokens cannot pile up requests at the API server. A request that finds no free slot within 1 second gets 503.
 - **A cache of verified tokens** (feature `cache`). Clients send the same token for minutes. limes can answer a repeated token from memory for a time you choose, so most requests skip the signature check or the `TokenReview` request. A cached answer never outlives the token's `exp`, and the memory stays within a limit you set.
-- **Several identity providers.** An `AuthenticatorChain` gives each token to the first authenticator that accepts its issuer and audience. Every user gets a `Subject`: the id of the identity provider and the id of the user there.
+- **Several identity providers or tenants.** An `AuthenticatorChain` gives each token to the first authenticator that accepts its issuer and audience, before any verification.
 - **Claim rules.** Require a scope, or claims with `any_of`, `all_of`, `none_of` or `exists`, also on nested claims. A rejection names the rule that failed, never a claim value, so it is safe to log.
 - **Errors clients can act on.** A token that is not accepted gets 401, an identity provider that cannot be reached gets 503, and a fault of the server gets 500. gRPC requests get the matching `grpc-status`.
 - **Your own authenticators** for API keys, opaque tokens or tests: implement the `Authenticator` trait.
