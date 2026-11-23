@@ -10,7 +10,7 @@ use k8s_openapi::api::authentication::v1::{
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::PostParams;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 /// How long a `TokenReview` request may take.
 const TOKEN_REVIEW_TIMEOUT: Duration = Duration::from_secs(10);
@@ -43,7 +43,11 @@ const TOKEN_REVIEW_TIMEOUT: Duration = Duration::from_secs(10);
 /// Its subject is `user.uid` by default, or `user.username` when the subject source is set to
 /// [`KubernetesSubjectSource::Username`] via
 /// [`set_subject_source`](`KubernetesAuthenticator::set_subject_source`). Claim rules read
-/// `user.extra`.
+/// `user.extra`. It is [valid until](Authentication::valid_until) the `exp` of the token, if
+/// the token is a JWT. A token without `exp`, such as a Secret-based service account token, has
+/// no end, so a cache keeps it for its whole `time_to_live`. For a JWT whose payload limes
+/// cannot read, the authentication is valid until the time of the review, so a cache does not
+/// keep it.
 pub struct KubernetesAuthenticator {
     idp_id: Option<String>,
     client: kube::client::Client,
@@ -197,6 +201,7 @@ impl Authenticator for KubernetesAuthenticator {
             &self.audiences,
             self.idp_id.as_deref(),
             self.subject_source,
+            token_expiry(token.as_str()),
         )
     }
 
@@ -223,11 +228,61 @@ impl Authenticator for KubernetesAuthenticator {
     }
 }
 
+/// Decodes the payload of a JWT as leniently as the API server does: base64 may keep trailing
+/// bits or padding, and the header is not read.
+const JWT_PART: base64::engine::GeneralPurpose = base64::engine::GeneralPurpose::new(
+    &base64::alphabet::URL_SAFE,
+    base64::engine::GeneralPurposeConfig::new()
+        .with_decode_allow_trailing_bits(true)
+        .with_decode_padding_mode(base64::engine::DecodePaddingMode::Indifferent),
+);
+
+/// Until when a token is valid: the `exp` of a JWT, which the API server verified. Read from
+/// the payload on its own, apart from the claims that route the token, so an `exp` of any shape
+/// leaves routing alone. `None` for a token that is no JWT, or a JWT without `exp`.
+///
+/// The API server checks service account tokens with go-jose, which reads exactly `exp`, and
+/// tokens of OpenID Connect providers with go-oidc, which reads the last key that equals `exp`
+/// ignoring case. The earliest of all such keys is never later than either.
+///
+/// The API server also accepts payloads and `exp` values this cannot read, such as numbers too
+/// large for a float, or a number in a string. Such a token is valid until now, so a cache does
+/// not store it.
+fn token_expiry(token: &str) -> Option<SystemTime> {
+    use base64::Engine as _;
+    let mut parts = token.split('.');
+    let (Some(_header), Some(payload), Some(_signature), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return None;
+    };
+    let claims = JWT_PART
+        .decode(payload)
+        .ok()
+        .and_then(|payload| serde_json::from_slice::<serde_json::Value>(&payload).ok());
+    let Some(claims) = claims.as_ref().and_then(serde_json::Value::as_object) else {
+        return Some(SystemTime::now());
+    };
+    let mut earliest: Option<SystemTime> = None;
+    for (_, exp) in claims
+        .iter()
+        .filter(|(key, _)| key.eq_ignore_ascii_case("exp"))
+    {
+        // go-oidc also reads a number in a string.
+        let Some(exp) = crate::identity::numeric_date(exp) else {
+            return Some(SystemTime::now());
+        };
+        earliest = Some(earliest.map_or(exp, |earliest| earliest.min(exp)));
+    }
+    earliest
+}
+
 fn parse_review_status(
     token_review: Option<TokenReviewStatus>,
     audiences: &[String],
     idp_id: Option<&str>,
     subject_source: KubernetesSubjectSource,
+    valid_until: Option<SystemTime>,
 ) -> Result<Authentication> {
     let token_review: TokenReviewStatus = token_review
         .ok_or_else(|| Error::unauthenticated("Kubernetes TokenReview returned no status"))?;
@@ -284,6 +339,7 @@ fn parse_review_status(
         .subject(subject)
         .audiences(actual_audiences.into_iter().collect())
         .identity(user)
+        .valid_until_opt(valid_until)
         .build())
 }
 
@@ -342,6 +398,135 @@ mod test {
             kube::client::Client::new(service, "default"),
         )
         .unwrap()
+    }
+
+    /// A token with the given payload, not signed.
+    fn unsigned_jwt(payload: &str) -> String {
+        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+        format!(
+            "{}.{}.signature",
+            URL_SAFE_NO_PAD.encode(r#"{"alg":"RS256","kid":"k1"}"#),
+            URL_SAFE_NO_PAD.encode(payload)
+        )
+    }
+
+    /// An authenticator whose API server authenticates every token.
+    fn accepting_authenticator() -> KubernetesAuthenticator {
+        let service = tower::service_fn(|_: http::Request<kube::client::Body>| async move {
+            let body = serde_json::json!({
+                "kind": "TokenReview",
+                "apiVersion": "authentication.k8s.io/v1",
+                "spec": {},
+                "status": { "authenticated": true, "user": { "uid": "u-1" } }
+            });
+            Ok::<_, std::io::Error>(
+                http::Response::builder()
+                    .status(201)
+                    .body(http_body_util::Full::new(bytes::Bytes::from(
+                        body.to_string(),
+                    )))
+                    .unwrap(),
+            )
+        });
+        KubernetesAuthenticator::new_with_client(
+            None,
+            vec![],
+            kube::client::Client::new(service, "default"),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_authentication_is_valid_until_the_exp_of_the_token() {
+        let authenticator = accepting_authenticator();
+        let at = |seconds| Some(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(seconds));
+        for (token, expected) in [
+            (
+                unsigned_jwt(r#"{"iss":"kubernetes/serviceaccount","exp":1730052519}"#),
+                at(1_730_052_519),
+            ),
+            (
+                unsigned_jwt(r#"{"iss":"kubernetes/serviceaccount","exp":1730052519.5}"#),
+                at(1_730_052_519),
+            ),
+            // A Secret-based token has no `exp`; an opaque token is no JWT.
+            (unsigned_jwt(r#"{"iss":"kubernetes/serviceaccount"}"#), None),
+            ("opaque-token".to_string(), None),
+        ] {
+            let authentication = authenticator
+                .authenticate(&Token::new(&token))
+                .await
+                .unwrap();
+            assert_eq!(authentication.valid_until(), expected, "{token}");
+        }
+    }
+
+    /// The API server accepts tokens that limes cannot route: an `alg` that jsonwebtoken does
+    /// not know, or base64 with non-zero trailing bits, which go-jose decodes leniently.
+    #[test]
+    fn test_exp_is_read_from_tokens_that_routing_cannot_read() {
+        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+        let at = |seconds| Some(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(seconds));
+        let payload = URL_SAFE_NO_PAD.encode(r#"{"exp":1730052519}"#);
+
+        let es512 = format!(
+            "{}.{payload}.signature",
+            URL_SAFE_NO_PAD.encode(r#"{"alg":"ES512"}"#)
+        );
+        assert_eq!(
+            Token::new(&es512).introspection(),
+            &IntrospectionResult::Unknown
+        );
+        assert_eq!(token_expiry(&es512), at(1_730_052_519));
+
+        // 18 bytes encode to 24 characters with no unused bits, so use one byte less: 17 bytes
+        // leave 2 unused bits in the last character.
+        let payload = URL_SAFE_NO_PAD.encode(r#"{"exp":173005251}"#);
+        let mut lenient = payload.clone().into_bytes();
+        let last = lenient.last_mut().unwrap();
+        *last = match *last {
+            b'A' => b'B',
+            other => other + 1,
+        };
+        let lenient = String::from_utf8(lenient).unwrap();
+        assert!(URL_SAFE_NO_PAD.decode(&lenient).is_err(), "{lenient}");
+        let token = format!(
+            "{}.{lenient}.signature",
+            URL_SAFE_NO_PAD.encode(r#"{"alg":"RS256"}"#)
+        );
+        assert_eq!(token_expiry(&token), at(173_005_251));
+
+        // go-jose refuses a repeated `exp`; go-oidc reads the last key that equals `exp`
+        // ignoring case.
+        for (payload, expected) in [
+            (r#"{"exp":1,"exp":2}"#, at(2)),
+            (r#"{"exp":200,"EXP":100}"#, at(100)),
+            (r#"{"Exp":100,"exp":200}"#, at(100)),
+        ] {
+            assert_eq!(token_expiry(&unsigned_jwt(payload)), expected, "{payload}");
+        }
+
+        assert_eq!(token_expiry("not-a-jwt"), None);
+        assert_eq!(token_expiry("bootstrap.token"), None);
+        assert_eq!(token_expiry(&format!("a.{payload}.b.c")), None);
+    }
+
+    /// A JWT whose payload or `exp` limes cannot read is valid until now, so a cache does not
+    /// store it.
+    #[test]
+    fn test_a_jwt_with_a_payload_limes_cannot_read_is_valid_until_now() {
+        let before = SystemTime::now();
+        for payload in [
+            r#"{"exp":"1800000000"}"#,
+            r#"{"exp":9999999999,"EXP":"1800000000"}"#,
+            r#"{"exp":1730052519,"big":1e400}"#,
+            r#"{"exp":1730052519"#,
+            "[1730052519]",
+        ] {
+            let valid_until = token_expiry(&unsigned_jwt(payload)).unwrap();
+            assert!(valid_until >= before, "{payload}");
+            assert!(valid_until <= SystemTime::now(), "{payload}");
+        }
     }
 
     /// An empty IdP id is unset, as for [`Subject::new`] and the JWKS authenticator.
@@ -467,6 +652,7 @@ mod test {
             &["nonexistant-audience".to_string()],
             Some("kubernetes"),
             KubernetesSubjectSource::Uid,
+            None,
         )
         .unwrap_err();
 
@@ -476,6 +662,7 @@ mod test {
             &["https://kubernetes.default.svc".to_string()],
             Some("my-k8s-cluster"),
             KubernetesSubjectSource::Uid,
+            None,
         )
         .unwrap();
 
@@ -529,6 +716,7 @@ mod test {
             &[],
             Some("kubernetes"),
             KubernetesSubjectSource::Uid,
+            None,
         )
         .unwrap_err();
     }
@@ -550,6 +738,7 @@ mod test {
             &["https://kubernetes.default.svc".to_string()],
             Some("kubernetes"),
             KubernetesSubjectSource::Username,
+            None,
         )
         .unwrap();
 
@@ -571,6 +760,7 @@ mod test {
             &[],
             Some("kubernetes"),
             KubernetesSubjectSource::Username,
+            None,
         )
         .unwrap_err();
     }
@@ -591,8 +781,14 @@ mod test {
         ] {
             let status = serde_json::json!({ "authenticated": true, "user": user });
             let token_review_status: TokenReviewStatus = serde_json::from_value(status).unwrap();
-            parse_review_status(Some(token_review_status), &[], Some("kubernetes"), source)
-                .unwrap_err();
+            parse_review_status(
+                Some(token_review_status),
+                &[],
+                Some("kubernetes"),
+                source,
+                None,
+            )
+            .unwrap_err();
         }
     }
 
@@ -613,9 +809,14 @@ mod test {
         ] {
             let status = serde_json::json!({ "authenticated": true, "user": user });
             let token_review_status: TokenReviewStatus = serde_json::from_value(status).unwrap();
-            let payload =
-                parse_review_status(Some(token_review_status), &[], Some("kubernetes"), source)
-                    .unwrap();
+            let payload = parse_review_status(
+                Some(token_review_status),
+                &[],
+                Some("kubernetes"),
+                source,
+                None,
+            )
+            .unwrap();
             assert_eq!(payload.subject().subject_in_idp(), expected);
         }
     }

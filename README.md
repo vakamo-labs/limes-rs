@@ -5,7 +5,7 @@
 [![Tests](https://github.com/vakamo-labs/limes-rs/actions/workflows/ci.yaml/badge.svg)](https://github.com/vakamo-labs/limes-rs/actions/workflows/ci.yaml)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-Bearer-token authentication for `axum`, `tonic` and other [tower](https://docs.rs/tower) services. limes verifies OpenID Connect JWTs against the keys of your identity provider, and Kubernetes service account tokens with the `TokenReview` API. One server can accept tokens from several identity providers.
+Bearer-token authentication middleware for `axum`, `tonic` and other [tower](https://docs.rs/tower) services. limes verifies OpenID Connect (OIDC) JWTs against the JWKS of your identity provider, and Kubernetes service account tokens with the `TokenReview` API. One server can accept tokens from several identity providers, and an optional cache answers repeated tokens from memory.
 
 limes authenticates the requests of [Lakekeeper](https://github.com/lakekeeper/lakekeeper), an Apache Iceberg REST catalog.
 
@@ -13,6 +13,7 @@ limes authenticates the requests of [Lakekeeper](https://github.com/lakekeeper/l
 
 - **JWT verification with cached keys.** limes finds the keys through `/.well-known/openid-configuration`, caches them and refreshes them in the background. A request for a known key never waits for a fetch, and the keys stay in use while the identity provider cannot be reached. Once keys have loaded, tokens with unknown key ids start at most one fetch every 30 seconds.
 - **Kubernetes service accounts** through the `TokenReview` API, with audience checks.
+- **A cache of verified tokens** (feature `cache`). Clients send the same token for minutes. limes can answer a repeated token from memory for a time you choose, so most requests skip the signature check or the `TokenReview` request. A cached answer never outlives the token's `exp`, and the memory stays within a limit you set.
 - **Several identity providers.** An `AuthenticatorChain` gives each token to the first authenticator that accepts its issuer and audience. Every user gets a `Subject`: the id of the identity provider and the id of the user there.
 - **Claim rules.** Require a scope, or claims with `any_of`, `all_of`, `none_of` or `exists`, also on nested claims. A rejection names the rule that failed, never a claim value, so it is safe to log.
 - **Errors clients can act on.** A token that is not accepted gets 401, an identity provider that cannot be reached gets 503, and a fault of the server gets 500. gRPC requests get the matching `grpc-status`.
@@ -116,6 +117,68 @@ async fn whoami(Extension(auth): Extension<Authentication>) -> impl IntoResponse
 }
 ```
 
+## Caching verified tokens
+
+Verifying a JWT costs tens of microseconds of signature checks, and a Kubernetes token costs a `TokenReview` request to the API server. Clients send the same token for minutes. `CachedAuthenticator` wraps any authenticator, also a chain or one of your own, and answers a token it verified a short time ago from memory. It needs the `cache` feature:
+
+```toml
+[dependencies]
+limes = { version = "0.8", features = ["cache"] }
+```
+
+```rust,no_run
+use std::time::Duration;
+
+use limes::{
+    cache::{CacheConfig, CachedAuthenticator},
+    jwks::JWKSWebAuthenticator,
+    tower::AuthenticationLayer,
+};
+
+#[tokio::main]
+async fn main() {
+    let authenticator = JWKSWebAuthenticator::new("https://accounts.google.com", None)
+        .await
+        .unwrap()
+        .set_accepted_audiences(vec!["my-app".to_string()]);
+
+    let authenticator = CachedAuthenticator::new(
+        authenticator,
+        CacheConfig::builder()
+            .time_to_live(Duration::from_secs(30)) // Reuse a verification for up to 30 seconds
+            .max_bytes(64 * 1024 * 1024) // Hold up to 64 MiB of authentications (the default)
+            .build(),
+    );
+
+    // Free the claims of expired tokens, for example when you export `stats()` as metrics.
+    let cache = authenticator.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(10));
+        loop {
+            interval.tick().await;
+            cache.remove_expired();
+        }
+    });
+
+    let app = axum::Router::new().layer(AuthenticationLayer::new(authenticator));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
+        .await
+        .unwrap();
+    axum::serve(listener, app).await.unwrap();
+}
+```
+
+What a cached answer means:
+
+- A token is answered from the cache only while a fresh verification would still accept it. An entry ends after `time_to_live` or at the token's `exp`, whichever is earlier.
+- The exception is a change the authenticator learns from outside the token: a key removed from the JWKS, a deleted Kubernetes service account or pod, or a revoked key of your own authenticator. Each process has its own cache, so in each process a token verified before the change keeps working for up to `time_to_live`. A removed JWKS key already works until the next JWKS refresh, one hour by default, so `time_to_live` matters most for Kubernetes tokens and authenticators of your own.
+- While a client keeps using a token, each process verifies it about once per `time_to_live`. A longer time saves more verifications; a shorter time ends access sooner after such a change. 30 seconds is a good start.
+- Only successful authentications are stored. The cache keeps an HMAC of each token, never the token itself.
+- A flood of tokens used only once does not push out the tokens that clients keep sending.
+- `max_bytes` bounds an estimate of the memory; plan for about 20 % more. An entry takes about 2 KB for a Kubernetes token, 5 to 6 KB for a typical OpenID Connect token, and up to 30 KB for an Entra ID token with many groups.
+- An authenticator of your own should set `Authentication::valid_until` for credentials that expire; without it an entry lasts the whole `time_to_live`. Do not wrap an authenticator of single-use tokens, or one that counts uses: a cached answer does not call it.
+- `stats()` reports hits, misses, evictions and size, for your metrics.
+
 ## Reading the identity
 
 An `Authentication` holds the `Subject`, the audiences of the token and the `Identity` the identity provider states: the claims of a JWT, or the user of a Kubernetes `TokenReview`. limes returns these as given. A display name, roles or a user type are your application's choice.
@@ -205,7 +268,8 @@ With gRPC-Web or CORS, add `AuthenticationLayer` inside `tonic_web::GrpcWebLayer
 - `aws-lc-rs`, `ring`: the crypto provider of the Kubernetes client's TLS.
 - `valuable`: `valuable::Valuable` for `Subject`, for structured logging.
 - `axum`: the deprecated `axum::authentication_middleware`. `tower::AuthenticationLayer` needs no feature.
-- `all`: `kubernetes`, `rustls-tls`, `jwks`, `axum` and `valuable`. Choose the crypto provider, `aws-lc-rs` or `ring`, yourself.
+- `cache`: the `cache::CachedAuthenticator`, which reuses successful authentications for a short time.
+- `all`: `kubernetes`, `rustls-tls`, `jwks`, `axum`, `valuable` and `cache`. Choose the crypto provider, `aws-lc-rs` or `ring`, yourself.
 
 The minimum supported Rust version is 1.95.
 
@@ -218,7 +282,7 @@ The minimum supported Rust version is 1.95.
 | `with_display_name_template`, `jwks::DisplayNameTemplate`, `jwks::DisplayNameTemplateError` | Removed. |
 | `format_subject`, `parse_subject`, `Error::InvalidSubject` | Removed. Choose a string form of `Subject` in your application. |
 | `claims(key)`, `all_claims()` | For `Identity::Claims(claims)`: `claims.as_json().get(key)` and `claims.as_json()`; `claims.claim(path)` reads nested claims. For `Identity::Kubernetes(user)`: `user.extra()`. To test a claim rule, `satisfies(rule)`. |
-| `issuer()`, `scopes()`, `expires_at()`, `issued_at()`, `not_before()` | The same methods on `VerifiedClaims`. |
+| `issuer()`, `scopes()`, `expires_at()`, `issued_at()`, `not_before()` | The same methods on `VerifiedClaims`. `Authentication::valid_until()` gives the expiry as a `SystemTime`, also for Kubernetes tokens. |
 | `token_header()` | The `header` of `Token::new(token).introspection()`, for a JWT. |
 | `Authentication::idp_id()` | `subject().idp_id()`. `Subject::idp_id()` and `Authenticator::idp_id()` return `Option<&str>`. |
 | `Authentication::builder()` with `token_header`, `claims`, `name`, `email`, `principal_type`, `roles` | `.subject(..)` and `.identity(..)` with `VerifiedClaims::new(map)`, `VerifiedClaims::try_from(value)` or a `KubernetesUser`; `audiences` is optional. |

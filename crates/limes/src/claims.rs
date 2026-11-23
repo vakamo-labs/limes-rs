@@ -273,6 +273,7 @@ impl ClaimRule {
 
     /// The claim paths in lookup order.
     #[must_use]
+    #[cfg(any(feature = "jwks", test))]
     pub(crate) fn claims(&self) -> &[String] {
         &self.claims
     }

@@ -18,6 +18,26 @@ pub(crate) fn scope_claim(claims: &serde_json::Value) -> Option<&serde_json::Val
     crate::claims::resolve(claims, [SCOPE_CLAIM, SCP_CLAIM])
 }
 
+/// A time claim of a JWT, such as `exp`, as a time rounded down to the second.
+///
+/// Reads every JSON number, so it is never later than the reading of a verifier: jsonwebtoken
+/// accepts an integer or a non-negative float and rounds it; the Kubernetes API server truncates.
+/// A negative value is the Unix epoch. `None` if the value is not a number, or too far in the
+/// future for a [`SystemTime`](std::time::SystemTime).
+#[cfg(any(feature = "jwks", feature = "kubernetes"))]
+pub(crate) fn numeric_date(value: &serde_json::Value) -> Option<std::time::SystemTime> {
+    use std::time::{Duration, SystemTime};
+    let exp = value;
+    let seconds = match exp.as_u64() {
+        Some(seconds) => seconds,
+        // A negative `exp`, or one with a fraction. JSON numbers are finite.
+        None => Duration::try_from_secs_f64(exp.as_f64()?.max(0.0))
+            .ok()?
+            .as_secs(),
+    };
+    SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(seconds))
+}
+
 /// What the identity provider states about the subject of a token, as it stated it.
 ///
 /// limes adds variants for new kinds of identity providers, so match with a wildcard arm.
@@ -372,6 +392,24 @@ mod test {
                 .count(),
             0
         );
+    }
+
+    #[test]
+    #[cfg(any(feature = "jwks", feature = "kubernetes"))]
+    fn test_numeric_date_reads_every_number_rounded_down() {
+        use std::time::{Duration, SystemTime};
+        let at = |seconds| Some(SystemTime::UNIX_EPOCH + Duration::from_secs(seconds));
+        let expiry = |exp: serde_json::Value| numeric_date(&exp);
+        assert_eq!(expiry(serde_json::json!(1_730_052_519)), at(1_730_052_519));
+        assert_eq!(
+            expiry(serde_json::json!(1_730_052_519.9)),
+            at(1_730_052_519)
+        );
+        assert_eq!(expiry(serde_json::json!(-5)), at(0));
+        assert_eq!(expiry(serde_json::json!(-5.5)), at(0));
+        assert_eq!(expiry(serde_json::json!("1730052519")), None);
+        assert_eq!(expiry(serde_json::json!(null)), None);
+        assert_eq!(expiry(serde_json::json!(1e300)), None);
     }
 
     #[test]
