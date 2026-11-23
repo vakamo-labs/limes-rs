@@ -207,6 +207,7 @@ mod tests {
             "iss": "https://example.com",
             "aud": "my-app",
         });
+        crate::install_test_jwt_crypto_provider();
         let token = jsonwebtoken::encode(
             &Header::new(jsonwebtoken::Algorithm::HS256),
             &claims,

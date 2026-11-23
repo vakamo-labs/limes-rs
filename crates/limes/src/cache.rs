@@ -70,7 +70,6 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use aws_lc_rs::hmac;
 use tokio::time::Instant;
 use typed_builder::TypedBuilder;
 
@@ -83,6 +82,58 @@ const MAX_SHARDS: usize = 64;
 const TYPICAL_ENTRY_BYTES: u64 = 4 * 1024;
 
 type Digest = [u8; 32];
+
+#[cfg(not(any(feature = "aws-lc-rs", feature = "rust-crypto")))]
+compile_error!(
+    "The `cache` feature of limes needs a crypto backend: enable its `aws-lc-rs` or `rust-crypto` feature."
+);
+
+/// HMAC-SHA256 under a random key of this process. The store keys entries by it, so it
+/// holds no token.
+#[cfg(feature = "aws-lc-rs")]
+struct TokenHmac(aws_lc_rs::hmac::Key);
+
+#[cfg(feature = "aws-lc-rs")]
+impl TokenHmac {
+    fn new() -> Self {
+        use aws_lc_rs::{hmac, rand::SystemRandom};
+        let key = hmac::Key::generate(hmac::HMAC_SHA256, &SystemRandom::new())
+            .expect("the operating system provides random numbers");
+        Self(key)
+    }
+
+    fn digest(&self, token: &str) -> Digest {
+        let tag = aws_lc_rs::hmac::sign(&self.0, token.as_bytes());
+        let mut digest = Digest::default();
+        digest.copy_from_slice(tag.as_ref());
+        digest
+    }
+}
+
+/// HMAC-SHA256 under a random key of this process. The store keys entries by it, so it
+/// holds no token.
+#[cfg(all(feature = "rust-crypto", not(feature = "aws-lc-rs")))]
+struct TokenHmac(hmac::Hmac<sha2::Sha256>);
+
+#[cfg(all(feature = "rust-crypto", not(feature = "aws-lc-rs")))]
+impl TokenHmac {
+    fn new() -> Self {
+        use hmac::KeyInit;
+        let mut key = [0u8; 32];
+        getrandom::fill(&mut key).expect("the operating system provides random numbers");
+        Self(hmac::Hmac::new_from_slice(&key).expect("HMAC takes keys of any length"))
+    }
+
+    fn digest(&self, token: &str) -> Digest {
+        use hmac::Mac;
+        let mut mac = self.0.clone();
+        mac.update(token.as_bytes());
+        let mut digest = Digest::default();
+        digest.copy_from_slice(&mac.finalize().into_bytes());
+        digest
+    }
+}
+
 type Store = quick_cache::sync::Cache<
     Digest,
     Entry,
@@ -122,7 +173,7 @@ pub struct CachedAuthenticator<A> {
 struct Shared<A> {
     inner: A,
     config: CacheConfig,
-    hmac_key: hmac::Key,
+    hmac: TokenHmac,
     store: Store,
     counters: Arc<Counters>,
 }
@@ -259,14 +310,11 @@ impl<A: Authenticator> CachedAuthenticator<A> {
                 counters: Arc::clone(&counters),
             },
         );
-        let hmac_key =
-            hmac::Key::generate(hmac::HMAC_SHA256, &aws_lc_rs::rand::SystemRandom::new())
-                .expect("the operating system provides random numbers");
         Self {
             shared: Arc::new(Shared {
                 inner: authenticator,
                 config,
-                hmac_key,
+                hmac: TokenHmac::new(),
                 store,
                 counters,
             }),
@@ -358,10 +406,7 @@ impl<A: Authenticator> Authenticator for CachedAuthenticator<A> {
 
 impl<A> Shared<A> {
     fn digest(&self, token: &str) -> Digest {
-        let tag = hmac::sign(&self.hmac_key, token.as_bytes());
-        let mut digest = Digest::default();
-        digest.copy_from_slice(tag.as_ref());
-        digest
+        self.hmac.digest(token)
     }
 
     fn lookup(&self, key: &Digest) -> Option<Authentication> {

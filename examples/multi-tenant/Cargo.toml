@@ -15,5 +15,6 @@ limes = { path = "../../crates/limes", default-features = false, features = [
     "jwks",
     "rustls-tls",
     "kubernetes",
+    "aws-lc-rs",
 ] }
 tokio = { version = "1.43", features = ["rt-multi-thread"] }

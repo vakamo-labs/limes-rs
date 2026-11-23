@@ -45,3 +45,13 @@ pub mod axum;
 #[cfg(all(doctest, feature = "jwks", feature = "kubernetes", feature = "cache"))]
 #[doc = include_str!("../README.md")]
 struct ReadmeDoctests;
+
+/// Selects jsonwebtoken's crypto provider for tests that sign or verify tokens. The
+/// dev-dependencies enable its `aws_lc_rs` backend, so with the `rust-crypto` feature both
+/// backends are enabled and jsonwebtoken cannot choose one; this installs `rust_crypto`, the
+/// backend that feature selects.
+#[cfg(test)]
+pub(crate) fn install_test_jwt_crypto_provider() {
+    #[cfg(feature = "rust-crypto")]
+    let _ = jsonwebtoken::crypto::rust_crypto::DEFAULT_PROVIDER.install_default();
+}

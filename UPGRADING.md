@@ -21,5 +21,6 @@ This page lists the changes that need updates in your code, by release.
 | `introspect::introspect(token)` | `Token::new(token).introspection().clone()`. |
 | Exhaustive `match` on `IntrospectionResult`, `AuthenticatorEnum`, `KubernetesSubjectSource` | Add a wildcard arm. Patterns of `IntrospectionResult::JWTBearer` need `..`. |
 | serde_json's `preserve_order` feature, turned on by limes for your whole build | limes leaves it off, so JSON objects sort their keys. If your code needs objects in insertion order, turn the feature on in your own `Cargo.toml`. |
+| `default-features = false` with JWT verification by aws-lc-rs | Add the feature `aws-lc-rs`, or `rust-crypto` for the RustCrypto crates. Without one, `JWKSWebAuthenticator::new` returns `Error::NoJwtCryptoProvider` and the `cache` feature does not build. |
 
 limes 0.8 also moves to jsonwebtoken 12, kube 5.1 and k8s-openapi 0.29.
