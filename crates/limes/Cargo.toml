@@ -7,8 +7,8 @@ homepage = { workspace = true }
 repository = { workspace = true }
 rust-version = { workspace = true }
 license = { workspace = true }
-description = "Bearer-token authentication middleware for axum, tonic and tower: OpenID Connect (OIDC) JWTs with cached JWKS, Kubernetes TokenReview, several identity providers, and a cache of verified tokens"
-keywords = ["authentication", "jwt", "oidc", "axum", "kubernetes"]
+description = "Fast token authentication for axum, tonic and tower: JWTs from any OpenID Connect (OIDC) provider, like Keycloak or Entra ID, and Kubernetes service account tokens, with keys and results cached."
+keywords = ["authentication", "jwt", "oidc", "axum", "jwks"]
 categories = ["authentication", "web-programming::http-server", "network-programming"]
 
 [package.metadata.docs.rs]
