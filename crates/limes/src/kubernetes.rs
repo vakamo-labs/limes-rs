@@ -34,9 +34,10 @@ const DEFAULT_MAX_CONCURRENT_REVIEWS: usize = 32;
 /// The authenticator and its clones run at most 32 `TokenReview`s at the same time;
 /// [`set_max_concurrent_reviews`](Self::set_max_concurrent_reviews) changes the limit. Two
 /// authenticators created with a constructor share nothing. A request that finds no free slot
-/// within 1 second fails with [`Error::KubernetesTokenReviewError`] of kind
-/// [`Unavailable`](crate::error::ErrorKind::Unavailable). So does a `TokenReview` that does not
-/// finish within 10 seconds, even if the client sets longer timeouts. A review keeps its slot
+/// within 1 second fails with [`Error::KubernetesTokenReviewLimitReached`]. A `TokenReview`
+/// that does not finish within 10 seconds fails with [`Error::KubernetesTokenReviewError`],
+/// even if the client sets longer timeouts. Both are of kind
+/// [`Unavailable`](crate::error::ErrorKind::Unavailable). A review keeps its slot
 /// while the Kubernetes client retries it; the default client retries answers such as 429.
 ///
 /// If you don't want to validate the audience or the issuer, pass an empty slice.
@@ -149,7 +150,8 @@ impl KubernetesAuthenticator {
     ///
     /// Each token, even a forged one, costs a `TokenReview` unless a cache answers it. The limit
     /// keeps a flood of such tokens from piling up requests at the API server. A request that
-    /// finds no free slot within 1 second fails with kind
+    /// finds no free slot within 1 second fails with
+    /// [`Error::KubernetesTokenReviewLimitReached`], of kind
     /// [`Unavailable`](crate::error::ErrorKind::Unavailable). A review that gets a slot has the
     /// full 10 seconds. Clones share the slots of the authenticator they were cloned from, so
     /// set the limit before you clone it.
@@ -208,21 +210,24 @@ impl Authenticator for KubernetesAuthenticator {
         let Ok(Ok(_slot)) =
             tokio::time::timeout(SLOT_WAIT_TIMEOUT, self.review_slots.acquire()).await
         else {
-            return Err(review_timed_out(format!(
-                "no free slot within {} ms; at most {} TokenReviews run at the same time",
-                SLOT_WAIT_TIMEOUT.as_millis(),
-                self.max_concurrent_reviews
-            )));
+            return Err(Error::KubernetesTokenReviewLimitReached {
+                max_concurrent_reviews: self.max_concurrent_reviews,
+            });
         };
         // kube's default client has no read timeout, so an API server that accepts the
         // connection and never answers would hold the request forever.
         let review = tokio::time::timeout(TOKEN_REVIEW_TIMEOUT, api.create(&params, &request))
             .await
             .map_err(|_| {
-                review_timed_out(format!(
-                    "no answer within {} seconds",
-                    TOKEN_REVIEW_TIMEOUT.as_secs()
-                ))
+                Error::KubernetesTokenReviewError(kube::Error::Service(Box::new(
+                    std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!(
+                            "no answer within {} seconds",
+                            TOKEN_REVIEW_TIMEOUT.as_secs()
+                        ),
+                    ),
+                )))
             })?
             .map_err(Error::KubernetesTokenReviewError)?;
 
@@ -256,14 +261,6 @@ impl Authenticator for KubernetesAuthenticator {
     fn idp_id(&self) -> Option<&str> {
         self.idp_id.as_deref()
     }
-}
-
-/// A `TokenReview` that found no free slot in time, or got no answer in time.
-fn review_timed_out(message: String) -> Error {
-    Error::KubernetesTokenReviewError(kube::Error::Service(Box::new(std::io::Error::new(
-        std::io::ErrorKind::TimedOut,
-        message,
-    ))))
 }
 
 /// Decodes the payload of a JWT as leniently as the API server does: base64 may keep trailing
@@ -720,10 +717,19 @@ mod test {
             .unwrap_err();
 
         assert_eq!(started.elapsed(), SLOT_WAIT_TIMEOUT);
+        assert!(
+            matches!(
+                err,
+                Error::KubernetesTokenReviewLimitReached {
+                    max_concurrent_reviews: 2
+                }
+            ),
+            "{err}"
+        );
         assert_eq!(err.kind(), ErrorKind::Unavailable);
         assert_eq!(
             err.to_string(),
-            "Failed to validate token using kubernetes TokenReview: ServiceError: no free slot within 1000 ms; at most 2 TokenReviews run at the same time"
+            "No free slot for a Kubernetes TokenReview: 2 reviews are already running"
         );
     }
 

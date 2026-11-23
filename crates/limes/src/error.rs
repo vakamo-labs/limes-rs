@@ -62,6 +62,13 @@ pub enum Error {
     #[cfg(feature = "kubernetes")]
     #[error("Failed to validate token using kubernetes TokenReview: {0}")]
     KubernetesTokenReviewError(#[source] kube::Error),
+    /// All slots for Kubernetes `TokenReview`s stayed taken while the request waited for one.
+    /// See `KubernetesAuthenticator::set_max_concurrent_reviews`.
+    #[cfg(feature = "kubernetes")]
+    #[error(
+        "No free slot for a Kubernetes TokenReview: {max_concurrent_reviews} reviews are already running"
+    )]
+    KubernetesTokenReviewLimitReached { max_concurrent_reviews: usize },
     #[error("Authentication failed: {reason}")]
     Unauthenticated { reason: String },
     /// A scope passed to `set_scope` that no token could satisfy.
@@ -161,7 +168,8 @@ impl Error {
                 ErrorKind::Internal
             }
             #[cfg(feature = "kubernetes")]
-            Self::KubernetesTokenReviewError(_) => ErrorKind::Unavailable,
+            Self::KubernetesTokenReviewError(_)
+            | Self::KubernetesTokenReviewLimitReached { .. } => ErrorKind::Unavailable,
             #[cfg(feature = "jwks")]
             Self::FetchJwksError { .. } | Self::FetchOpenIDWellKnownConfigError { .. } => {
                 ErrorKind::Unavailable
