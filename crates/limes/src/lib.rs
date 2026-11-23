@@ -13,6 +13,8 @@
 #![cfg_attr(not(doctest), doc = include_str!("../README.md"))]
 
 mod authenticator;
+#[cfg(feature = "cache")]
+pub mod cache;
 mod chain;
 pub mod claims;
 pub mod error;
@@ -38,8 +40,8 @@ pub use token::Token;
 #[cfg(feature = "axum")]
 pub mod axum;
 
-/// The README examples need the `jwks` and `kubernetes` features, so they run as doctests
-/// only with both.
-#[cfg(all(doctest, feature = "jwks", feature = "kubernetes"))]
+/// The README examples need the `jwks`, `kubernetes` and `cache` features, so they run as
+/// doctests only with all three.
+#[cfg(all(doctest, feature = "jwks", feature = "kubernetes", feature = "cache"))]
 #[doc = include_str!("../README.md")]
 struct ReadmeDoctests;

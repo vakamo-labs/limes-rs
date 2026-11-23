@@ -413,6 +413,11 @@ fn extract_authentication(
 ) -> Result<Authentication> {
     let subject_in_idp = get_subject(&token_data, subject_claim)?;
     let audiences = crate::introspect::parse_aud(token_data.claims.get(AUDIENCE_CLAIM));
+    // jsonwebtoken reads exactly `exp` and refuses a payload that repeats it.
+    let valid_until = token_data
+        .claims
+        .get("exp")
+        .and_then(crate::identity::numeric_date);
     // A payload with a subject claim is a JSON object.
     let claims = VerifiedClaims::try_from(token_data.claims)
         .map_err(|_| Error::rejected(RejectionReason::SubjectClaimMissing))?;
@@ -422,6 +427,7 @@ fn extract_authentication(
         .subject(subject)
         .audiences(audiences)
         .identity(claims)
+        .valid_until_opt(valid_until)
         .build())
 }
 
@@ -742,6 +748,29 @@ mod test {
         .unwrap();
         let err = verify(&jwk, &token, &header, &[]).unwrap_err();
         assert_eq!(err.rejection(), Some(&RejectionReason::Expired));
+    }
+
+    /// jsonwebtoken accepts an `exp` with a fraction. The authentication is never valid longer
+    /// than jsonwebtoken verified.
+    #[test]
+    fn test_authentication_is_valid_until_a_float_exp_rounded_down() {
+        let (enc, jwk) = ed25519_fixture();
+        let mut header = Header::new(Algorithm::EdDSA);
+        header.kid = Some("k1".to_string());
+        let exp = 9_999_999_999.75_f64;
+        let token = jsonwebtoken::encode(
+            &header,
+            &serde_json::json!({ "iss": ISS, "aud": AUD, "sub": "u", "exp": exp }),
+            &enc,
+        )
+        .unwrap();
+        let token_data = verify(&jwk, &token, &header, &[]).unwrap();
+        let authentication =
+            extract_authentication(None, token_data, &[SUBJECT_CLAIM.to_string()]).unwrap();
+        assert_eq!(
+            authentication.valid_until(),
+            Some(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(9_999_999_999))
+        );
     }
 
     #[test]
@@ -1353,6 +1382,10 @@ mod test {
         let expected_payload = Authentication::builder()
             .subject(subject)
             .identity(VerifiedClaims::try_from(claims.clone()).unwrap())
+            .valid_until(
+                std::time::SystemTime::UNIX_EPOCH
+                    + Duration::from_secs(claims["exp"].as_u64().unwrap()),
+            )
             .audiences(HashSet::from([
                 "00000003-0000-0000-c000-000000000000".to_string()
             ]))
@@ -1406,6 +1439,10 @@ mod test {
         let expected_payload = Authentication::builder()
             .subject(subject)
             .identity(VerifiedClaims::try_from(claims.clone()).unwrap())
+            .valid_until(
+                std::time::SystemTime::UNIX_EPOCH
+                    + Duration::from_secs(claims["exp"].as_u64().unwrap()),
+            )
             .audiences(HashSet::from(["api://xyz".to_string()]))
             .build();
 
@@ -1469,6 +1506,10 @@ mod test {
         let expected_payload = Authentication::builder()
             .subject(subject)
             .identity(VerifiedClaims::try_from(claims.clone()).unwrap())
+            .valid_until(
+                std::time::SystemTime::UNIX_EPOCH
+                    + Duration::from_secs(claims["exp"].as_u64().unwrap()),
+            )
             .audiences(HashSet::from([
                 "00000003-0000-0000-c000-000000000000".to_string()
             ]))
@@ -1534,6 +1575,10 @@ mod test {
         let expected_payload = Authentication::builder()
             .subject(subject.clone())
             .identity(VerifiedClaims::try_from(claims.clone()).unwrap())
+            .valid_until(
+                std::time::SystemTime::UNIX_EPOCH
+                    + Duration::from_secs(claims["exp"].as_u64().unwrap()),
+            )
             .audiences(HashSet::from(["account".to_string()]))
             .build();
 
@@ -1603,6 +1648,10 @@ mod test {
         let expected_payload = Authentication::builder()
             .subject(subject.clone())
             .identity(VerifiedClaims::try_from(claims.clone()).unwrap())
+            .valid_until(
+                std::time::SystemTime::UNIX_EPOCH
+                    + Duration::from_secs(claims["exp"].as_u64().unwrap()),
+            )
             .audiences(HashSet::from([
                 "iceberg-catalog".to_string(),
                 "account".to_string(),

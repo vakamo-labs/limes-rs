@@ -27,6 +27,7 @@ test: doc-test
 	cargo test --all-targets --all-features --workspace
 	cargo test --all-targets --workspace --no-default-features
 	cargo test --all-targets --workspace --features "all"
+	cargo test --all-targets -p limes --no-default-features --features cache
 
 doc-test:
 	cargo test --no-fail-fast --doc --all-features --workspace

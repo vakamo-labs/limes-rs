@@ -2,6 +2,7 @@ use crate::{Identity, Subject, Token, error::Result};
 use core::{future::Future, marker::Sync};
 use std::collections::HashSet;
 use std::fmt::Debug;
+use std::time::SystemTime;
 use typed_builder::TypedBuilder;
 
 pub trait Authenticator
@@ -52,6 +53,9 @@ pub struct Authentication {
     audiences: HashSet<String>,
     #[builder(setter(into))]
     identity: Identity,
+    /// Until when the credential is valid, if the authenticator knows it.
+    #[builder(default, setter(strip_option(fallback = valid_until_opt)))]
+    valid_until: Option<SystemTime>,
 }
 
 impl Authentication {
@@ -74,6 +78,18 @@ impl Authentication {
     #[must_use]
     pub fn identity(&self) -> &Identity {
         &self.identity
+    }
+
+    /// Until when the credential is valid, if the authenticator knows it: valid before this
+    /// time, not at it. For a JWT, its `exp` claim rounded down to the second; the claim itself
+    /// is [`VerifiedClaims::expires_at`](crate::VerifiedClaims::expires_at).
+    ///
+    /// The `CachedAuthenticator` of the `cache` feature never returns a cached authentication
+    /// after this time. An [`Authenticator`] of your own should set it for every credential
+    /// that expires.
+    #[must_use]
+    pub fn valid_until(&self) -> Option<SystemTime> {
+        self.valid_until
     }
 
     /// Whether the identity satisfies `rule`.

@@ -71,6 +71,7 @@ impl OneOrMany {
 
 /// Parse the `aud` claim from a JSON value into a `HashSet<String>`.
 /// Handles both single-string (`"aud": "app"`) and array (`"aud": ["app1", "app2"]`) forms.
+#[cfg(any(feature = "jwks", test))]
 pub(crate) fn parse_aud(value: Option<&serde_json::Value>) -> HashSet<String> {
     value
         .and_then(|v| OneOrMany::deserialize(v).ok())
