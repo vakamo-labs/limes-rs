@@ -10,10 +10,14 @@ use k8s_openapi::api::authentication::v1::{
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::PostParams;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
+use tokio::sync::Semaphore;
 
-/// How long a `TokenReview` request may take.
+/// How long a `TokenReview` request may take, the wait for a free slot included.
 const TOKEN_REVIEW_TIMEOUT: Duration = Duration::from_secs(10);
+/// How many `TokenReview`s run at the same time, unless set otherwise.
+const DEFAULT_MAX_CONCURRENT_REVIEWS: usize = 32;
 
 #[derive(Clone)]
 /// Authenticator for Kubernetes.
@@ -23,9 +27,12 @@ const TOKEN_REVIEW_TIMEOUT: Duration = Duration::from_secs(10);
 ///
 /// If no `client` is specified, the default client on the system will be used.
 ///
-/// A `TokenReview` that does not finish within 10 seconds fails with
-/// [`Error::KubernetesTokenReviewError`] of kind [`Unavailable`](crate::error::ErrorKind::Unavailable),
-/// also if the client sets longer timeouts.
+/// At most 32 `TokenReview`s run at the same time, shared by the authenticator and its clones;
+/// see [`set_max_concurrent_reviews`](Self::set_max_concurrent_reviews). A request waits for a
+/// free slot. A `TokenReview` that does not finish within 10 seconds, the wait included, fails
+/// with [`Error::KubernetesTokenReviewError`] of kind
+/// [`Unavailable`](crate::error::ErrorKind::Unavailable), also if the client sets longer
+/// timeouts.
 ///
 /// If you don't want to validate the audience or the issuer, pass an empty slice.
 /// When using [`AuthenticatorChain`](`crate::AuthenticatorChain`), it is highly recommended to set
@@ -54,6 +61,9 @@ pub struct KubernetesAuthenticator {
     audiences: Vec<String>,
     issuers: Vec<String>,
     subject_source: KubernetesSubjectSource,
+    max_concurrent_reviews: usize,
+    /// One permit per `TokenReview` that may run.
+    review_slots: Arc<Semaphore>,
 }
 
 /// Which field of the Kubernetes `TokenReview` response is used as the
@@ -89,13 +99,7 @@ impl KubernetesAuthenticator {
         idp_id: Option<&str>,
         audiences: Vec<String>,
     ) -> Result<Self> {
-        Ok(Self {
-            idp_id: idp_id.filter(|id| !id.is_empty()).map(ToString::to_string),
-            client: Self::get_client().await?,
-            audiences,
-            issuers: vec![],
-            subject_source: KubernetesSubjectSource::default(),
-        })
+        Self::new_with_client(idp_id, audiences, Self::get_client().await?)
     }
 
     /// Create a new [`KubernetesAuthenticator`].
@@ -119,6 +123,8 @@ impl KubernetesAuthenticator {
             audiences,
             issuers: vec![],
             subject_source: KubernetesSubjectSource::default(),
+            max_concurrent_reviews: DEFAULT_MAX_CONCURRENT_REVIEWS,
+            review_slots: Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_REVIEWS)),
         })
     }
 
@@ -132,6 +138,19 @@ impl KubernetesAuthenticator {
     /// Defaults to [`KubernetesSubjectSource::Uid`].
     pub fn set_subject_source(&mut self, subject_source: KubernetesSubjectSource) {
         self.subject_source = subject_source;
+    }
+
+    /// Set how many `TokenReview`s may run at the same time, at least 1. Defaults to 32.
+    ///
+    /// Every token that no cache answers costs a `TokenReview`, also a forged one. The limit
+    /// keeps a flood of such tokens from overloading the API server and this server. A request
+    /// waits for a free slot, and the wait counts toward the 10 seconds a `TokenReview` may
+    /// take. Clones made after this call share its slots; clones made before keep the slots
+    /// they had.
+    pub fn set_max_concurrent_reviews(&mut self, max_concurrent_reviews: usize) {
+        let max_concurrent_reviews = max_concurrent_reviews.clamp(1, Semaphore::MAX_PERMITS);
+        self.max_concurrent_reviews = max_concurrent_reviews;
+        self.review_slots = Arc::new(Semaphore::new(max_concurrent_reviews));
     }
 
     async fn get_client() -> Result<kube::client::Client> {
@@ -182,18 +201,22 @@ impl Authenticator for KubernetesAuthenticator {
         };
         // kube's default client has no read timeout, so an API server that accepts the
         // connection and never answers would hold the request forever.
-        let review = tokio::time::timeout(TOKEN_REVIEW_TIMEOUT, api.create(&params, &request))
+        let deadline = tokio::time::Instant::now() + TOKEN_REVIEW_TIMEOUT;
+        let Ok(Ok(_slot)) = tokio::time::timeout_at(deadline, self.review_slots.acquire()).await
+        else {
+            return Err(review_timed_out(format!(
+                "no free slot within {} seconds, the limit of concurrent reviews is {}",
+                TOKEN_REVIEW_TIMEOUT.as_secs(),
+                self.max_concurrent_reviews
+            )));
+        };
+        let review = tokio::time::timeout_at(deadline, api.create(&params, &request))
             .await
             .map_err(|_| {
-                Error::KubernetesTokenReviewError(kube::Error::Service(Box::new(
-                    std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        format!(
-                            "no answer within {} seconds",
-                            TOKEN_REVIEW_TIMEOUT.as_secs()
-                        ),
-                    ),
-                )))
+                review_timed_out(format!(
+                    "no answer within {} seconds",
+                    TOKEN_REVIEW_TIMEOUT.as_secs()
+                ))
             })?
             .map_err(Error::KubernetesTokenReviewError)?;
 
@@ -227,6 +250,14 @@ impl Authenticator for KubernetesAuthenticator {
     fn idp_id(&self) -> Option<&str> {
         self.idp_id.as_deref()
     }
+}
+
+/// A `TokenReview` that did not finish within [`TOKEN_REVIEW_TIMEOUT`].
+fn review_timed_out(message: String) -> Error {
+    Error::KubernetesTokenReviewError(kube::Error::Service(Box::new(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        message,
+    ))))
 }
 
 /// Decodes the payload of a JWT as leniently as the API server does: base64 may keep trailing
@@ -352,7 +383,8 @@ impl std::fmt::Debug for KubernetesAuthenticator {
             .field("client", &"kube::client::Client")
             .field("issuers", &self.issuers)
             .field("subject_source", &self.subject_source)
-            .finish()
+            .field("max_concurrent_reviews", &self.max_concurrent_reviews)
+            .finish_non_exhaustive()
     }
 }
 
@@ -411,23 +443,26 @@ mod test {
         )
     }
 
+    /// The answer of an API server that authenticates the token.
+    fn accepted_review() -> http::Response<http_body_util::Full<bytes::Bytes>> {
+        let body = serde_json::json!({
+            "kind": "TokenReview",
+            "apiVersion": "authentication.k8s.io/v1",
+            "spec": {},
+            "status": { "authenticated": true, "user": { "uid": "u-1" } }
+        });
+        http::Response::builder()
+            .status(201)
+            .body(http_body_util::Full::new(bytes::Bytes::from(
+                body.to_string(),
+            )))
+            .unwrap()
+    }
+
     /// An authenticator whose API server authenticates every token.
     fn accepting_authenticator() -> KubernetesAuthenticator {
         let service = tower::service_fn(|_: http::Request<kube::client::Body>| async move {
-            let body = serde_json::json!({
-                "kind": "TokenReview",
-                "apiVersion": "authentication.k8s.io/v1",
-                "spec": {},
-                "status": { "authenticated": true, "user": { "uid": "u-1" } }
-            });
-            Ok::<_, std::io::Error>(
-                http::Response::builder()
-                    .status(201)
-                    .body(http_body_util::Full::new(bytes::Bytes::from(
-                        body.to_string(),
-                    )))
-                    .unwrap(),
-            )
+            Ok::<_, std::io::Error>(accepted_review())
         });
         KubernetesAuthenticator::new_with_client(
             None,
@@ -607,6 +642,75 @@ mod test {
             err.to_string(),
             "Failed to validate token using kubernetes TokenReview: ServiceError: no answer within 10 seconds"
         );
+    }
+
+    /// Requests beyond the limit wait for a free slot. Clones share the slots.
+    #[tokio::test(start_paused = true)]
+    async fn test_at_most_max_concurrent_reviews_run_at_the_same_time() {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let running = Arc::new(AtomicUsize::new(0));
+        let most = Arc::new(AtomicUsize::new(0));
+        let service = {
+            let (running, most) = (Arc::clone(&running), Arc::clone(&most));
+            tower::service_fn(move |_: http::Request<kube::client::Body>| {
+                let (running, most) = (Arc::clone(&running), Arc::clone(&most));
+                async move {
+                    most.fetch_max(running.fetch_add(1, SeqCst) + 1, SeqCst);
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    running.fetch_sub(1, SeqCst);
+                    Ok::<_, std::io::Error>(accepted_review())
+                }
+            })
+        };
+        let mut authenticator = KubernetesAuthenticator::new_with_client(
+            None,
+            vec![],
+            kube::client::Client::new(service, "default"),
+        )
+        .unwrap();
+        authenticator.set_max_concurrent_reviews(2);
+
+        let started = tokio::time::Instant::now();
+        let mut requests = tokio::task::JoinSet::new();
+        for _ in 0..6 {
+            let authenticator = authenticator.clone();
+            requests.spawn(async move { authenticator.authenticate(&Token::new("token")).await });
+        }
+        for result in requests.join_all().await {
+            result.unwrap();
+        }
+        assert_eq!(most.load(SeqCst), 2);
+        assert_eq!(started.elapsed(), Duration::from_secs(3));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_a_review_without_a_free_slot_is_unavailable() {
+        let mut authenticator = accepting_authenticator();
+        authenticator.set_max_concurrent_reviews(2);
+        let _busy = authenticator.review_slots.acquire_many(2).await.unwrap();
+
+        let started = tokio::time::Instant::now();
+        let err = authenticator
+            .clone()
+            .authenticate(&Token::new("token"))
+            .await
+            .unwrap_err();
+
+        assert_eq!(started.elapsed(), TOKEN_REVIEW_TIMEOUT);
+        assert_eq!(err.kind(), ErrorKind::Unavailable);
+        assert_eq!(
+            err.to_string(),
+            "Failed to validate token using kubernetes TokenReview: ServiceError: no free slot within 10 seconds, the limit of concurrent reviews is 2"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_max_concurrent_reviews_is_at_least_one() {
+        let mut authenticator = authenticator_with_api(None);
+        assert_eq!(authenticator.review_slots.available_permits(), 32);
+        authenticator.set_max_concurrent_reviews(0);
+        assert_eq!(authenticator.max_concurrent_reviews, 1);
+        assert_eq!(authenticator.review_slots.available_permits(), 1);
     }
 
     #[tokio::test]

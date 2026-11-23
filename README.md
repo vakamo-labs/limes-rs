@@ -12,7 +12,7 @@ limes authenticates the requests of [Lakekeeper](https://github.com/lakekeeper/l
 ## Features
 
 - **JWT verification with cached keys.** limes finds the keys through `/.well-known/openid-configuration`, caches them and refreshes them in the background. A request for a known key never waits for a fetch, and the keys stay in use while the identity provider cannot be reached. Once keys have loaded, tokens with unknown key ids start at most one fetch every 30 seconds.
-- **Kubernetes service accounts** through the `TokenReview` API, with audience checks.
+- **Kubernetes service accounts** through the `TokenReview` API, with audience checks. At most 32 reviews run at the same time, so a flood of tokens cannot overload the API server.
 - **A cache of verified tokens** (feature `cache`). Clients send the same token for minutes. limes can answer a repeated token from memory for a time you choose, so most requests skip the signature check or the `TokenReview` request. A cached answer never outlives the token's `exp`, and the memory stays within a limit you set.
 - **Several identity providers.** An `AuthenticatorChain` gives each token to the first authenticator that accepts its issuer and audience. Every user gets a `Subject`: the id of the identity provider and the id of the user there.
 - **Claim rules.** Require a scope, or claims with `any_of`, `all_of`, `none_of` or `exists`, also on nested claims. A rejection names the rule that failed, never a claim value, so it is safe to log.
