@@ -46,7 +46,7 @@ const TOKEN_REVIEW_TIMEOUT: Duration = Duration::from_secs(10);
 /// `user.extra`. It is [valid until](Authentication::valid_until) the `exp` of the token, if
 /// the token is a JWT. A token without `exp`, such as a Secret-based service account token, has
 /// no end, so a cache keeps it for its whole `time_to_live`. For a JWT whose payload limes
-/// cannot read, the authentication is valid until the time of the review, so a cache does not
+/// cannot read, the authentication is valid until the review started, so a cache does not
 /// keep it.
 pub struct KubernetesAuthenticator {
     idp_id: Option<String>,
@@ -168,6 +168,7 @@ impl Authenticator for KubernetesAuthenticator {
             }
         }
 
+        let review_started = SystemTime::now();
         let api = kube::api::Api::all(self.client.clone());
         let params = PostParams::default();
         let request = TokenReview {
@@ -201,7 +202,7 @@ impl Authenticator for KubernetesAuthenticator {
             &self.audiences,
             self.idp_id.as_deref(),
             self.subject_source,
-            token_expiry(token.as_str()),
+            token_expiry(token.as_str(), review_started),
         )
     }
 
@@ -246,9 +247,9 @@ const JWT_PART: base64::engine::GeneralPurpose = base64::engine::GeneralPurpose:
 /// ignoring case. The earliest of all such keys is never later than either.
 ///
 /// The API server also accepts payloads and `exp` values this cannot read, such as numbers too
-/// large for a float, or a number in a string. Such a token is valid until now, so a cache does
-/// not store it.
-fn token_expiry(token: &str) -> Option<SystemTime> {
+/// large for a float, or a number in a string. Such a token is valid until `review_started`, so
+/// a cache does not store it.
+fn token_expiry(token: &str, review_started: SystemTime) -> Option<SystemTime> {
     use base64::Engine as _;
     let mut parts = token.split('.');
     let (Some(_header), Some(payload), Some(_signature), None) =
@@ -261,7 +262,7 @@ fn token_expiry(token: &str) -> Option<SystemTime> {
         .ok()
         .and_then(|payload| serde_json::from_slice::<serde_json::Value>(&payload).ok());
     let Some(claims) = claims.as_ref().and_then(serde_json::Value::as_object) else {
-        return Some(SystemTime::now());
+        return Some(review_started);
     };
     let mut earliest: Option<SystemTime> = None;
     for (_, exp) in claims
@@ -270,7 +271,7 @@ fn token_expiry(token: &str) -> Option<SystemTime> {
     {
         // go-oidc also reads a number in a string.
         let Some(exp) = crate::identity::numeric_date(exp) else {
-            return Some(SystemTime::now());
+            return Some(review_started);
         };
         earliest = Some(earliest.map_or(exp, |earliest| earliest.min(exp)));
     }
@@ -467,6 +468,7 @@ mod test {
     fn test_exp_is_read_from_tokens_that_routing_cannot_read() {
         use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
         let at = |seconds| Some(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(seconds));
+        let started = SystemTime::UNIX_EPOCH;
         let payload = URL_SAFE_NO_PAD.encode(r#"{"exp":1730052519}"#);
 
         let es512 = format!(
@@ -477,7 +479,7 @@ mod test {
             Token::new(&es512).introspection(),
             &IntrospectionResult::Unknown
         );
-        assert_eq!(token_expiry(&es512), at(1_730_052_519));
+        assert_eq!(token_expiry(&es512, started), at(1_730_052_519));
 
         // 18 bytes encode to 24 characters with no unused bits, so use one byte less: 17 bytes
         // leave 2 unused bits in the last character.
@@ -494,7 +496,7 @@ mod test {
             "{}.{lenient}.signature",
             URL_SAFE_NO_PAD.encode(r#"{"alg":"RS256"}"#)
         );
-        assert_eq!(token_expiry(&token), at(173_005_251));
+        assert_eq!(token_expiry(&token, started), at(173_005_251));
 
         // go-jose refuses a repeated `exp`; go-oidc reads the last key that equals `exp`
         // ignoring case.
@@ -503,19 +505,23 @@ mod test {
             (r#"{"exp":200,"EXP":100}"#, at(100)),
             (r#"{"Exp":100,"exp":200}"#, at(100)),
         ] {
-            assert_eq!(token_expiry(&unsigned_jwt(payload)), expected, "{payload}");
+            assert_eq!(
+                token_expiry(&unsigned_jwt(payload), started),
+                expected,
+                "{payload}"
+            );
         }
 
-        assert_eq!(token_expiry("not-a-jwt"), None);
-        assert_eq!(token_expiry("bootstrap.token"), None);
-        assert_eq!(token_expiry(&format!("a.{payload}.b.c")), None);
+        assert_eq!(token_expiry("not-a-jwt", started), None);
+        assert_eq!(token_expiry("bootstrap.token", started), None);
+        assert_eq!(token_expiry(&format!("a.{payload}.b.c"), started), None);
     }
 
-    /// A JWT whose payload or `exp` limes cannot read is valid until now, so a cache does not
-    /// store it.
+    /// A JWT whose payload or `exp` limes cannot read is valid until the review started, so a
+    /// cache does not store it.
     #[test]
-    fn test_a_jwt_with_a_payload_limes_cannot_read_is_valid_until_now() {
-        let before = SystemTime::now();
+    fn test_a_jwt_with_a_payload_limes_cannot_read_is_valid_until_the_review_started() {
+        let started = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
         for payload in [
             r#"{"exp":"1800000000"}"#,
             r#"{"exp":9999999999,"EXP":"1800000000"}"#,
@@ -523,9 +529,11 @@ mod test {
             r#"{"exp":1730052519"#,
             "[1730052519]",
         ] {
-            let valid_until = token_expiry(&unsigned_jwt(payload)).unwrap();
-            assert!(valid_until >= before, "{payload}");
-            assert!(valid_until <= SystemTime::now(), "{payload}");
+            assert_eq!(
+                token_expiry(&unsigned_jwt(payload), started),
+                Some(started),
+                "{payload}"
+            );
         }
     }
 

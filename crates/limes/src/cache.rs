@@ -174,10 +174,13 @@ impl Entry {
                 .is_none_or(|valid_until| now_system < valid_until)
     }
 
-    /// Whether the entry ended at the time `now_system` was read. An entry whose verification
-    /// started later is fresh: a request stored it while the caller looked at the store.
+    /// Whether the entry ended at the time the clocks were read. An entry whose verification
+    /// started later is fresh: a request stored it while the caller looked at the store. After
+    /// the system clock moved backwards, the monotonic clock still ends the entry.
     fn has_ended(&self, time_to_live: Duration, now: Instant, now_system: SystemTime) -> bool {
-        self.verified_at_system <= now_system && !self.is_valid(time_to_live, now, now_system)
+        now.saturating_duration_since(self.verified_at) >= time_to_live
+            || (self.verified_at_system <= now_system
+                && !self.is_valid(time_to_live, now, now_system))
     }
 }
 
@@ -666,6 +669,13 @@ mod tests {
         assert!(!entry.has_ended(TTL, now, at(99)));
         assert!(!entry.has_ended(TTL, now, at(129)));
         assert!(entry.has_ended(TTL, now, at(130)));
+    }
+
+    #[test]
+    fn test_an_entry_ends_after_the_time_to_live_also_when_the_system_clock_moved_backwards() {
+        let entry = entry(at(100), None);
+        assert!(!entry.has_ended(TTL, entry.verified_at, at(50)));
+        assert!(entry.has_ended(TTL, entry.verified_at + TTL, at(50)));
     }
 
     #[tokio::test]
