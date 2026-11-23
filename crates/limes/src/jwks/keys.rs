@@ -181,6 +181,7 @@ mod test {
     }
 
     fn verifies(key: &VerificationKey, signer: &EncodingKey) -> bool {
+        crate::install_test_jwt_crypto_provider();
         let token = jsonwebtoken::encode(
             &Header::new(Algorithm::EdDSA),
             &serde_json::json!({ "sub": "u" }),

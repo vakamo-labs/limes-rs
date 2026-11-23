@@ -112,6 +112,15 @@ pub enum Error {
     #[cfg(feature = "jwks")]
     #[error("Failed to decode JWT Token. {reason}")]
     JWTDecodeError { reason: String },
+    /// jsonwebtoken has no crypto provider to verify signatures with: the build enables
+    /// neither or both of its backends, which the features `aws-lc-rs` and `rust-crypto`
+    /// select, and none was installed with
+    /// [`CryptoProvider::install_default`](jsonwebtoken::crypto::CryptoProvider::install_default).
+    #[cfg(feature = "jwks")]
+    #[error(
+        "jsonwebtoken has no crypto provider. Enable exactly one of the limes features aws-lc-rs and rust-crypto, or install a provider with jsonwebtoken::crypto::CryptoProvider::install_default"
+    )]
+    NoJwtCryptoProvider,
     #[error("Internal error. {reason}.")]
     InternalError {
         reason: String,
@@ -177,7 +186,7 @@ impl Error {
             #[cfg(feature = "kubernetes")]
             Self::KubernetesConfigError(_) => ErrorKind::Internal,
             #[cfg(feature = "jwks")]
-            Self::InvalidWellKnownConfig { .. } => ErrorKind::Internal,
+            Self::InvalidWellKnownConfig { .. } | Self::NoJwtCryptoProvider => ErrorKind::Internal,
             #[cfg(feature = "jwks")]
             Self::JWTDecodeError { .. } => ErrorKind::Unauthenticated,
             Self::InternalError { .. } | Self::InvalidScope { .. } | Self::UrlParseError(_) => {

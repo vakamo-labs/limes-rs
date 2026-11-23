@@ -8,7 +8,7 @@ use crate::{
     error::RejectionReason,
     error::{Error, Result},
 };
-use jsonwebtoken::{Header, Validation};
+use jsonwebtoken::{Header, Validation, crypto::CryptoProvider};
 use key_cache::KeyCache;
 use keys::VerificationKey;
 use std::sync::Arc;
@@ -23,6 +23,13 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 const SUBJECT_CLAIM: &str = "sub";
 const AUDIENCE_CLAIM: &str = "aud";
+
+/// jsonwebtoken verifies signatures with its process-level crypto provider and panics on the
+/// first token if it has none. Checked when an authenticator is created, so a build that
+/// enables neither or both of its backends fails at startup.
+fn require_crypto_provider(provider: Option<&CryptoProvider>) -> Result<()> {
+    provider.map(|_| ()).ok_or(Error::NoJwtCryptoProvider)
+}
 
 /// Validate JWT tokens using JWKS keys fetched from a remote server.
 ///
@@ -85,10 +92,16 @@ impl JWKSWebAuthenticator {
     /// when a token needs one.
     ///
     /// # Errors
+    /// - If jsonwebtoken has no crypto provider ([`Error::NoJwtCryptoProvider`]): the build
+    ///   enables neither or both of its backends. The features `aws-lc-rs` and `rust-crypto`
+    ///   select one; if another crate in the build enables the other, install one with
+    ///   [`CryptoProvider::install_default`](jsonwebtoken::crypto::CryptoProvider::install_default)
+    ///   before calling `new`.
     /// - If the `issuer_url` is not a valid URL.
     /// - If the `issuer_url` does not provide a `/.well-known/openid-configuration` endpoint.
     /// - If the fetched configuration does not contain the required fields.
     pub async fn new(issuer_url: &str, ttl: Option<Duration>) -> Result<Self> {
+        require_crypto_provider(CryptoProvider::try_get_default())?;
         let (keys, issuer, config_url) = JWKSWebAuthenticator::discover(issuer_url, ttl).await?;
         Ok(Self {
             inner: std::sync::Arc::new(Inner {
@@ -526,6 +539,7 @@ mod test {
 
     fn ed25519_fixture() -> (jsonwebtoken::EncodingKey, serde_json::Value) {
         use base64::Engine as _;
+        crate::install_test_jwt_crypto_provider();
         let key_pair = aws_lc_rs::signature::Ed25519KeyPair::generate().unwrap();
         let pkcs8 = key_pair.to_pkcs8().unwrap();
         let encoding_key = jsonwebtoken::EncodingKey::from_ed_der(pkcs8.as_ref());
@@ -889,6 +903,7 @@ mod test {
     #[test]
     fn test_authenticate_jwt_uses_token_alg_when_jwk_has_none() {
         use base64::Engine as _;
+        crate::install_test_jwt_crypto_provider();
         let key_pair = aws_lc_rs::signature::Ed25519KeyPair::generate().unwrap();
         let pkcs8 = key_pair.to_pkcs8().unwrap();
         let enc = jsonwebtoken::EncodingKey::from_ed_der(pkcs8.as_ref());
@@ -1276,6 +1291,16 @@ mod test {
         );
         assert_eq!(err.kind(), crate::error::ErrorKind::Unauthenticated);
         server.abort();
+    }
+
+    /// Without a jsonwebtoken crypto provider, creating the authenticator fails.
+    #[test]
+    fn test_an_authenticator_needs_a_jwt_crypto_provider() {
+        let err = require_crypto_provider(None).unwrap_err();
+        assert!(matches!(err, Error::NoJwtCryptoProvider), "{err:?}");
+        assert_eq!(err.kind(), crate::error::ErrorKind::Internal);
+        crate::install_test_jwt_crypto_provider();
+        assert!(require_crypto_provider(CryptoProvider::try_get_default()).is_ok());
     }
 
     /// A token can name any key the IdP publishes, including an encryption key, which is

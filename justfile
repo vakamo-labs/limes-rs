@@ -10,7 +10,8 @@ check-clippy:
 	cargo clippy --all-features --all-targets --workspace -- -D warnings
 	cargo clippy --workspace -- -D warnings
 	cargo clippy --workspace --no-default-features -- -D warnings
-	cargo clippy --workspace --features "all" -- -D warnings
+	cargo clippy --workspace --features "all aws-lc-rs" -- -D warnings
+	cargo clippy -p limes --all-targets --no-default-features --features "all rust-crypto ring" -- -D warnings
 
 
 check-cargo-sort:
@@ -26,8 +27,9 @@ fix-format:
 test: doc-test
 	cargo test --all-targets --all-features --workspace
 	cargo test --all-targets --workspace --no-default-features
-	cargo test --all-targets --workspace --features "all"
-	cargo test --all-targets -p limes --no-default-features --features cache
+	cargo test --all-targets --workspace --features "all aws-lc-rs"
+	cargo test --all-targets -p limes --no-default-features --features "all rust-crypto ring"
+	cargo test --all-targets -p limes --no-default-features --features "cache aws-lc-rs"
 
 doc-test:
 	cargo test --no-fail-fast --doc --all-features --workspace

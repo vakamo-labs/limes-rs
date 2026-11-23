@@ -265,11 +265,17 @@ With gRPC-Web or CORS, add `AuthenticationLayer` inside `tonic_web::GrpcWebLayer
 - `jwks`: the `JWKSWebAuthenticator`.
 - `kubernetes`: the `KubernetesAuthenticator`. Select a Kubernetes version in your own `k8s-openapi` dependency; limes leaves that choice to the binary.
 - `rustls-tls`: `rustls` for all dependencies.
-- `aws-lc-rs`, `ring`: the crypto provider of the Kubernetes client's TLS.
+- `aws-lc-rs`: aws-lc-rs verifies JWT signatures, computes the keys of the cache and is the crypto provider of the Kubernetes client's TLS.
+- `rust-crypto`: the RustCrypto crates verify JWT signatures and compute the keys of the cache. Turn off the default features to use it in place of `aws-lc-rs`.
+- `ring`: the crypto provider of the Kubernetes client's TLS.
 - `valuable`: `valuable::Valuable` for `Subject`, for structured logging.
 - `axum`: the deprecated `axum::authentication_middleware`. `tower::AuthenticationLayer` needs no feature.
 - `cache`: the `cache::CachedAuthenticator`, which reuses successful authentications for a short time.
-- `all`: `kubernetes`, `rustls-tls`, `jwks`, `axum`, `valuable` and `cache`. Choose the crypto provider, `aws-lc-rs` or `ring`, yourself.
+- `all`: `kubernetes`, `rustls-tls`, `jwks`, `axum`, `valuable` and `cache`. Choose the crypto features yourself.
+
+Enable exactly one of `aws-lc-rs` and `rust-crypto`. The `cache` feature does not build without one. If both are on, for example because another crate in your build enables jsonwebtoken's other backend, install one with `jsonwebtoken::crypto::CryptoProvider::install_default` before creating a `JWKSWebAuthenticator`; otherwise `JWKSWebAuthenticator::new` returns `Error::NoJwtCryptoProvider`.
+
+`rustls-tls` uses reqwest's `rustls` feature, which brings aws-lc-rs as the TLS provider of requests to the identity provider, also with `rust-crypto`.
 
 The minimum supported Rust version is 1.95.
 
